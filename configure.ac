@@ -32,7 +32,7 @@ fi
 
 # -------------------------------------------------------------------------------------------------
 POST_COMPILE_MSG=""
-CXXFLAGS="${CXXFLAGS+$CXXFLAGS }-std=gnu++17"
+CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-std=gnu++17"
 CUDA_FLAGS="$CUDA_FLAGS${CUDA_FLAGS:+${CUDAFLAGS:+ }}$CUDAFLAGS"
 INC="${INC-}"
 LDFLAGS="${LDFLAGS-}"
@@ -126,7 +126,7 @@ if test "$host_vendor" = "apple"; then
 	AC_DEFINE([HAVE_MACOSX], [1], [This is Mac X OS])
         APPEXT=.app
 elif expr "x$host_os" : "x.*mingw32.*" > /dev/null ||
-expr "x$host_os" : "x.*msys.*" > /dev/null; then
+  expr "x$host_os" : "x.*msys.*" > /dev/null || test "$host_os" = cygwin; then
         system=Windows
         APPEXT=.exe
 	AC_DEFINE([WIN32], [1], [This is an Windows OS])
@@ -150,7 +150,7 @@ fi
 if test $system = Linux; then
         AC_CHECK_HEADERS([linux/version.h])
 	LDFLAGS="$LDFLAGS -Wl,--dynamic-list-data"
-        COMMON_FLAGS="${COMMON_FLAGS+$COMMON_FLAGS }-D_GNU_SOURCE"
+        COMMON_FLAGS="${COMMON_FLAGS:+$COMMON_FLAGS }-D_GNU_SOURCE"
 fi
 
 if test $system = MacOSX; then
@@ -174,12 +174,23 @@ if test $system = Windows; then
 	LIBS="$LIBS -lsetupapi -lws2_32 -liphlpapi -lole32 -loleaut32"
 	LIBS="$LIBS -ldbghelp"
 	AC_CHECK_FUNCS(SetThreadDescription)
+        if $CXX -dM -E - </dev/null | grep clang >/dev/null; then
+                AC_CHECK_PROG([LLD], [lld], [yes])
+                if test "$LLD" = yes; then
+                        COMMON_FLAGS="${COMMON_FLAGS:+$COMMON_FLAGS }-gcodeview"
+                        UV_LDFLAGS="-fuse-ld=lld -g -Wl,--pdb=bin/uv.pdb"
+                fi
+        fi
+        if ! expr "x$COMMON_FLAGS" : '.*gcodeview' >/dev/null; then
+                UG_MSG_WARN([Windows stacktrace will not be available.])
+        fi
 fi
 
 LINKER=$CXX
 
 AC_SUBST(LINKER)
 AC_SUBST(LDFLAGS)
+AC_SUBST(UV_LDFLAGS)
 AC_SUBST(CXXFLAGS)
 
 AC_ARG_ENABLE(depends-version-check,
@@ -214,9 +225,9 @@ test $ac_cv_sizeof_int_p -eq 4; }
 then
         LIBS="${LIBS:+$LIBS }-latomic" # needed for atomic_uint64_t
 fi
-CFLAGS="$CFLAGS${ARCH+ $ARCH}"
-CXXFLAGS="$CXXFLAGS${ARCH+ $ARCH}"
-LDFLAGS="$LDFLAGS${ARCH+ $ARCH}"
+CFLAGS="$CFLAGS${ARCH:+ $ARCH}"
+CXXFLAGS="$CXXFLAGS${ARCH:+ $ARCH}"
+LDFLAGS="$LDFLAGS${ARCH:+ $ARCH}"
 
 if expr "x$CFLAGS" : 'x.*-O' >/dev/null; then
         OFAST=""
@@ -443,6 +454,30 @@ AC_ARG_VAR([GENICAM_GENTL64_PATH], [XIMEA SDK library path])
 AC_ARG_VAR([NTV2_ROOT], [Directory to AJA NTV2 SDK (ends with ntv2projects).])
 AC_ARG_VAR([SAGE_DIRECTORY], [Directory of your SAGE installation.])
 
+# ------------------------------------------------
+# libbacktrace
+# -----------------------------------------------
+libbacktrace=no
+AC_ARG_ENABLE(libbacktrace,
+              AS_HELP_STRING([--disable-libbacktrace], [disable libbacktrace]),
+              [libbacktrace_req=$enableval],
+              [libbacktrace_req=$build_default])
+
+if test "${libbacktrace_req?}" != no; then
+        AC_CHECK_HEADER(backtrace.h)
+        AC_CHECK_LIB(backtrace, backtrace_pcinfo)
+        if test "${ac_cv_header_backtrace_h?}" = yes && \
+                test "${ac_cv_lib_backtrace_backtrace_pcinfo?}" = yes;
+        then
+                LIBS="$LIBS -lbacktrace"
+                AC_DEFINE([HAVE_LIBBACKTRACE], [1], [we have libbacktrace])
+                libbacktrace=yes
+        fi
+fi
+
+ENSURE_FEATURE_PRESENT([$libbacktrace_req], [$libbacktrace],
+[libbacktrace not found])
+
 # -------------------------------------------------------------------------------------------------
 # CUDA stuff
 #
@@ -503,7 +538,7 @@ then
                         fi
                         DEFAULT_LIB_P=$($LINKER --verbose 2>&1 | awk \
 'BEGIN { ORS="" } /InstalledDir: / { print $2 }')/../lib
-                        CUDA_LIB="${CUDA_LIB+$CUDA_LIB }-L$DEFAULT_LIB_P"
+                        CUDA_LIB="${CUDA_LIB:+$CUDA_LIB }-L$DEFAULT_LIB_P"
                         CUDA_LIB="$CUDA_LIB -L\"$cl_lib_path\""
                         FOUND_CUDA=yes
                 fi
@@ -534,7 +569,7 @@ then
                 fi
         fi
 
-        CUDA_LIB="${CUDA_LIB+$CUDA_LIB }-L$CUDA_LIB_PATH -lcudart"
+        CUDA_LIB="${CUDA_LIB:+$CUDA_LIB }-L$CUDA_LIB_PATH -lcudart"
         CUDA_INC="-I$CUDA_PATH/include"
         CUDA_COMPILER="$NVCC"
         INC="$INC $CUDA_INC"
@@ -645,6 +680,8 @@ AC_CHECK_LIB(glew32, glewInit)
 AC_CHECK_LIB(X11, XCreateWindow)
 LIBS=$SAVED_LIBS
 CFLAGS=$SAVED_CFLAGS
+HAVE_GL=no
+HAVE_GLEW=no
 
 GL_COMMON_OBJ="src/gl_context.o"
 
@@ -3192,8 +3229,8 @@ then
         if test "${found_cl?}" = yes && test "${found_cl_h?}" = yes; then
                 AC_DEFINE([HAVE_OPENCL], [1], [OpenCL is supported])
                 cmpto_libs="$cmpto_libs $OpenCL_LIBS"
-                CFLAGS="$CFLAGS${OpenCL_CFLAGS+ $OPENCL_CFLAGS}"
-                CFLAGS="$CFLAGS${OpenCL_Headers_CFLAGS+ $OPENCL_Headers_CFLAGS}"
+                CFLAGS="$CFLAGS${OpenCL_CFLAGS:+ $OPENCL_CFLAGS}"
+                CFLAGS="$CFLAGS${OpenCL_Headers_CFLAGS:+ $OPENCL_Headers_CFLAGS}"
         fi
 
         add_module vcompress_cmpto_j2k "src/video_compress/cmpto_j2k.o \
@@ -3400,7 +3437,7 @@ then
                 SDL_MIXER_LIBS=$(remove_mwindows "$SDL_MIXER_LIBS")
                 SDL_MIXER_CFLAGS=$($PKG_CONFIG --cflags-only-I SDL${sdl_ver_suffix}_mixer)
                 add_module acap_sdl_mixer src/audio/capture/sdl_mixer.o "$SDL_MIXER_LIBS"
-                INC="$INC${SDL_MIXER_CFLAGS+ $SDL_MIXER_CFLAGS}"
+                INC="$INC${SDL_MIXER_CFLAGS:+ $SDL_MIXER_CFLAGS}"
                 sdl_mixer=yes
         fi
 fi
@@ -3567,6 +3604,7 @@ RESULT=`add_column "$RESULT" "Debug output" $debug_output $?`
 RESULT=`add_column "$RESULT" "iHDTV support" $ihdtv $?`
 RESULT=`add_column "$RESULT" "IPv6 support" $ipv6 $?`
 RESULT=`add_column "$RESULT" "Library live555" $livemedia $?`
+RESULT=`add_column "$RESULT" "Libbacktrace" $libbacktrace $?`
 RESULT=`add_column "$RESULT" "Manual pages" $man $?`
 RESULT=`add_column "$RESULT" "OpenCV" $opencv $?`
 RESULT=`add_column "$RESULT" "Profiling support" $profile $?`

@@ -3,7 +3,7 @@
  * @author Martin Pulec     <pulec@cesnet.cz>
  */
 /*
- * Copyright (c) 2019-2023 CESNET
+ * Copyright (c) 2019-2025 CESNET
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -312,10 +312,29 @@ print_stacktrace_win()
         char backtrace_msg[] = "Backtrace:\n";
         _write(STDERR_FILENO, backtrace_msg, strlen(backtrace_msg));
         for (unsigned short i = 0; i < frames; i++) {
-                SymFromAddr(process, (DWORD64) (stack[i]), 0, symbol);
+                BOOL ret =  SymFromAddr(process, (DWORD64) (stack[i]), 0, symbol);
                 char buf[STR_LEN];
-                snprintf_ch(buf, "%i (%p): %s - 0x%0llX\n", frames - i - 1,
-                            stack[i], symbol->Name, symbol->Address);
+                snprintf_ch(buf, "%i (%p): ", frames - i - 1, stack[i]);
+                if (ret == TRUE) {
+                        snprintf(buf + strlen(buf), sizeof buf - strlen(buf),
+                                 "%s - 0x%0llX\n", symbol->Name,
+                                 symbol->Address);
+
+                        IMAGEHLP_LINE64 line = { .SizeOfStruct = sizeof line };
+                        DWORD           displacementLine = 0;
+                        if (SymGetLineFromAddr64(process, (DWORD64) (stack[i]),
+                                                 &displacementLine, &line)) {
+                                snprintf(buf + strlen(buf),
+                                         sizeof buf - strlen(buf),
+                                         "\tFile: %s, line: %lu, displacement: "
+                                         "%lu\n",
+                                         line.FileName, line.LineNumber,
+                                         displacementLine);
+                        }
+                } else {
+                        snprintf(buf + strlen(buf), sizeof buf - strlen(buf),
+                                 "(cannot resolve)\n");
+                }
                 _write(STDERR_FILENO, buf, strlen(buf));
         }
 

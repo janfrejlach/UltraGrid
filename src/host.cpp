@@ -46,7 +46,7 @@
 
 #ifdef _WIN32
 #include <io.h>
-#elif defined(__GLIBC__)
+#elif defined(__APPLE__) || defined(__GLIBC__)
 #include <execinfo.h>
 #include <fcntl.h>
 #endif // !defined _WIN32
@@ -58,6 +58,12 @@
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 27
 #include <sys/syscall.h>
+#endif
+
+#ifdef HAVE_LIBBACKTRACE
+#include <backtrace.h>
+#else
+struct backtrace_state {};
 #endif
 
 #include <algorithm>                    // for max
@@ -188,6 +194,8 @@ void *mainloop_udata;
 // required for NVCC+MSVC compiled objs if /nodefaultlib is used
 extern "C" int _fltused = 0;
 #endif
+
+static struct backtrace_state *bt;
 
 struct init_data {
         bool com_initialized = false;
@@ -428,6 +436,59 @@ static void echeck_unexpected_exit(void ) {
         fprintf(stderr, "exit() called unexpectedly! Maybe by some library?\n");
 }
 
+#ifdef HAVE_LIBBACKTRACE
+static void
+libbt_error_callback(void *data, const char *msg, int errnum)
+{
+        int fd = *reinterpret_cast<int*>(data);
+        char buf[STR_LEN];
+        char *start = buf;
+        const char *const end = buf + sizeof buf;
+
+        //fprintf(stderr, "libbacktrace error: %s (%d)\n", msg, errnum);
+
+        strappend(&start, end, "libbacktrace error: ");
+        strappend(&start, end, msg);
+        strappend(&start, end, " (");
+        append_number(&start, end, errnum);
+
+        write_all(fd, start - buf, buf);
+}
+
+static int
+libbt_full_callback(void *data, uintptr_t pc, const char *filename, int lineno,
+              const char *function)
+{
+        int fd = *reinterpret_cast<int*>(data);
+        char buf[STR_LEN];
+        char *start = buf;
+        const char *const end = buf + sizeof buf;
+
+        // printf("  %s at %s:%d [pc=%p]\n", function ? function : "??",
+        //        filename ? filename : "??", lineno, (void *) pc);
+
+        strappend(&start, end, "  ");
+        if (function == nullptr) {
+                function = "??";
+        }
+        strappend(&start, end, function);
+        strappend(&start, end, " at ");
+        if (filename == nullptr) {
+                filename = "??";
+        }
+        strappend(&start, end, filename);
+        strappend(&start, end, ":");
+        append_number(&start, end, lineno);
+        strappend(&start, end, " [pc=0x");
+        append_number(&start, end, (uintmax_t) pc);
+        strappend(&start, end, "]\n");
+
+        write_all(fd, start - buf, buf);
+
+        return 0; // continue
+}
+#endif // defined HAVE_LIBBACKTRACE
+
 struct init_data *common_preinit(int argc, char *argv[])
 {
         uv_argc = argc;
@@ -525,6 +586,12 @@ struct init_data *common_preinit(int argc, char *argv[])
 
 #ifdef HAVE_FEC_INIT
         fec_init();
+#endif
+
+#ifdef HAVE_LIBBACKTRACE
+        int fd = STDERR_FILENO;
+        bt = backtrace_create_state(uv_argv[0], 1 /*thread safe*/,
+                                    libbt_error_callback, &fd);
 #endif
 
         atexit(echeck_unexpected_exit);
@@ -1197,40 +1264,19 @@ bool running_in_debugger(){
         return false;
 }
 
-#if defined(__GLIBC__)
-/// print stacktrace with backtrace_symbols_fd() (glibc or macOS)
-static void
-print_stacktrace_glibc()
+#if defined(__APPLE__) || defined(__GLIBC__)
+/// dumps output of fd (from start_off offset) to stderr
+/// and keep the pointer at the end of the file
+/// @retval size of the file pointed by fd (current pos)
+static off_t
+st_glibc_flush_output(int fd, off_t start_off)
 {
-        // print to a temporary file to avoid interleaving from multiple
-        // threads
-#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 27)
-        int fd = memfd_create("ultragrid_backtrace", MFD_CLOEXEC);
-#else
-        char path[MAX_PATH_SIZE];
-#ifdef __APPLE__
-        const unsigned long tid = pthread_mach_thread_np(pthread_self());
-#else
-        const unsigned long tid = syscall(__NR_gettid);
-#endif
-        snprintf(path, sizeof path, "%s/ug-%lu", get_temp_dir(), tid);
-        int fd = open(path, O_CLOEXEC | O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-        unlink(path);
-#endif
-        if (fd == -1) {
-                fd = STDERR_FILENO;
-        }
-        char backtrace_msg[] = "Backtrace:\n";
-        write_all(fd, sizeof backtrace_msg, backtrace_msg);
-        array<void *, 256> addresses{};
-        const int num_symbols = backtrace(addresses.data(), addresses.size());
-        backtrace_symbols_fd(addresses.data(), num_symbols, fd);
         if (fd == STDERR_FILENO) {
-                return;
+                return 0;
         }
 
-        lseek(fd, 0, SEEK_SET);
-        char buf[STR_LEN];
+        lseek(fd, start_off, SEEK_SET);
+        char    buf[STR_LEN];
         ssize_t rbytes = 0;
         while ((rbytes = read(fd, buf, sizeof buf)) > 0) {
                 ssize_t written = 0;
@@ -1241,7 +1287,78 @@ print_stacktrace_glibc()
                         written += wbytes;
                 }
         }
-        close(fd);
+        return lseek(fd, 0, SEEK_CUR);
+}
+/**
+ * print stacktrace with backtrace_symbols_fd() (glibc or macOS)
+ *
+ * ideally all functions should be async-signal-safe as defined by POSIX
+ * (glibc deviates sligntly, see also signal-safety(7))
+ */
+static void
+print_stacktrace_glibc()
+{
+        // print to a temporary file to avoid interleaving from multiple
+        // threads
+#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 27)
+        int fd = memfd_create("ultragrid_backtrace", MFD_CLOEXEC);
+#else
+        char path[MAX_PATH_SIZE];
+#ifdef __APPLE__
+        unsigned long tid = pthread_mach_thread_np(pthread_self());
+#else
+        unsigned long tid = syscall(__NR_gettid);
+#endif
+        // snprintf(path, sizeof path, "%s/ug-%lu", get_temp_dir(), tid);
+        char *start = path;
+        path[sizeof path - 1] = '\0';
+        const char *const end = path + sizeof path - 1;
+        strappend(&start, end, get_temp_dir());
+        strappend(&start, end, "/ug-bt-");
+        append_number(&start, end, tid);
+        *start = '\0';
+        int fd = open(path, O_CLOEXEC | O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+        unlink(path);
+#endif
+        if (fd == -1) {
+                fd = STDERR_FILENO;
+        }
+        char backtrace_msg[] = "Backtrace:\n";
+        write_all(fd, sizeof backtrace_msg - 1, backtrace_msg);
+        array<void *, 256> addresses{};
+        const int num_symbols = backtrace(addresses.data(), addresses.size());
+        backtrace_symbols_fd(addresses.data(), num_symbols, fd);
+
+        // in case that the below fails, try write at least something
+        off_t last_pos = st_glibc_flush_output(fd, 0);
+
+#ifdef HAVE_LIBBACKTRACE
+        char backtrace2_msg[] = "\nBacktrace symbolic:\n";
+        write_all(fd, sizeof backtrace2_msg - 1, backtrace2_msg);
+        for (int i = 0; i < num_symbols; i++) {
+                // printf("%2d: ", i);
+                enum { NDIGITS = 2 };
+                char sym_nr[] = { 'X', 'X', ':', ' ' };
+                int num_tmp = i;
+                for (int i = 0; i < NDIGITS; ++i) {
+                        if (num_tmp == 0 && i != 0) {
+                                sym_nr[NDIGITS - 1 - i] = ' ';
+                        } else {
+                                sym_nr[NDIGITS - 1 - i] = '0' + (num_tmp % 10);
+                                num_tmp /= 10;
+                        }
+                }
+                write_all(fd, sizeof sym_nr, sym_nr);
+                // backtrace_pcinfo may not be async-signal-safe
+                backtrace_pcinfo(bt, (uintptr_t) addresses[i], libbt_full_callback,
+                                 libbt_error_callback, &fd);
+        }
+        st_glibc_flush_output(fd, last_pos);
+#endif
+
+        if (fd != STDERR_FILENO) {
+                close(fd);
+        }
 }
 #endif // defined(__GLIBC__)
 
@@ -1250,7 +1367,7 @@ print_backtrace()
 {
 #ifdef _WIN32
         print_stacktrace_win();
-#elif defined(__GLIBC__)
+#elif defined(__APPLE__) || defined(__GLIBC__)
         print_stacktrace_glibc();
 #else
         const char *msg = "Stacktrace printout not supported!\n";
