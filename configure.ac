@@ -2376,6 +2376,31 @@ if test $uyvy_req = yes && test $uyvy = no; then
 fi
 
 # -------------------------------------------------------------------------------------------------
+# JPEG XS
+
+jpegxs=no
+
+AC_ARG_ENABLE(jpegxs,
+[  --disable-jpegxs        disable JPEG XS compression (auto)]
+[                         Requires: svt-jpegxs],
+   [jpegxs_req=$enableval],
+   [jpegxs_req=$build_default]
+)
+
+PKG_CHECK_MODULES([JPEGXS], [SvtJpegxs >= 0.10],
+    [FOUND_JPEGXS_DEP=yes],
+    [FOUND_JPEGXS_DEP=no]
+)
+
+if test "$jpegxs_req" != no -a "$FOUND_JPEGXS_DEP" = yes; then
+        JPEGXS_COMPRESS_OBJ="src/video_compress/jpegxs.o"
+        add_module vcompress_jpegxs "$JPEGXS_COMPRESS_OBJ" "$JPEGXS_LIBS"
+        jpegxs=yes
+else
+        jpegxs=no
+fi
+
+# -------------------------------------------------------------------------------------------------
 # GPUJPEG
 
 gpujpeg=no
@@ -3664,6 +3689,7 @@ RESULT=`add_column "$RESULT" "Comprimato J2K" $cmpto_j2k $?`
 RESULT=`add_column "$RESULT" "CUDA DXT" $cuda_dxt $?`
 RESULT=`add_column "$RESULT" "GPUJPEG" $gpujpeg $?`
 RESULT=`add_column "$RESULT" "GPUJPEG transcode to DXT" $gpujpeg_to_dxt $?`
+RESULT=`add_column "$RESULT" "JPEG XS" $jpegxs $?`
 RESULT=`add_column "$RESULT" "Lavc (VDP $lavc_hwacc_vdpau, VA $lavc_hwacc_vaapi)" $libavcodec $?`
 RESULT=`add_column "$RESULT" "Realtime DXT" $rtdxt $?`
 RESULT=`add_column "$RESULT" "UYVY dummy compression" $uyvy $?`
