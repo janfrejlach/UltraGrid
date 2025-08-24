@@ -61,10 +61,11 @@ c_start_server(struct rtsp_server_parameters params)
     server->params = params;
     server->watch = 0;
 
-    int ret;
     BasicRTSPOnlyServer *srv = BasicRTSPOnlyServer::initInstance(server->params);
     srv->init_server();
-    ret = pthread_create(&server->server_th, NULL, BasicRTSPOnlyServer::start_server, &server->watch);
+    int ret = pthread_create(&server->server_th, NULL,
+                             BasicRTSPOnlyServer::start_server,
+                             (void *) &server->watch);
     assert(ret == 0);
 
     return server;
