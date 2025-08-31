@@ -45,11 +45,10 @@
  * @todo errata (SDL3 vs SDL2)
  * 1. [macOS] Vulkan renderer doesn't work (no matter if linked with MoltenVK or
  * loader)
- * 2. [all platforms] with `renderer=vulkan` - none YCbCr texture works
+ * 2. [all platforms] with `renderer=vulkan` - none of YCbCr textures work
  * (segfaults - wrong pitch/texture?)
  * 3. p010 works just on macOS/Metal, crashes on Vulkan (see previous point)
  * 4. p010 corrupted on d3d[12] - pixfmts skipped in query*() as a workaround
- * 5. see todo in @ref ../audio/capture/sdl_mixer.c
  */
 
 #include <SDL3/SDL.h>
@@ -1396,5 +1395,5 @@ static const struct video_display_info display_sdl3_info = {
 
 REGISTER_MODULE(sdl, &display_sdl3_info, LIBRARY_CLASS_VIDEO_DISPLAY,
                 VIDEO_DISPLAY_ABI_VERSION);
-REGISTER_HIDDEN_MODULE(sdl3, &display_sdl3_info, LIBRARY_CLASS_VIDEO_DISPLAY,
-                       VIDEO_DISPLAY_ABI_VERSION);
+REGISTER_MODULE_WITH_FLAG(sdl3, &display_sdl3_info, LIBRARY_CLASS_VIDEO_DISPLAY,
+                          VIDEO_DISPLAY_ABI_VERSION, MODULE_FLAG_ALIAS);

@@ -92,7 +92,8 @@ add_fonts() { # for GUI+testcard2
                         cp "$FONT_PATH" $APPPREFIX/share/fonts
                 done
         done
-        if ls $APPPREFIX/lib/*mixer* >/dev/null 2>&1; then
+        if ls $APPPREFIX/lib/*mixer* >/dev/null 2>&1 ||
+           ls $APPPREFIX/lib/ultragrid/*fluidsynth* >/dev/null 2>&1; then
                 mkdir -p $APPPREFIX/share/soundfonts
                 cp "$srcdir/data/default.sf3" $APPPREFIX/share/soundfonts/
         fi
@@ -135,7 +136,7 @@ fi
 DIRNAME=$(dirname "$0")
 uname_m=$(uname -m)
 excl_list_arch=x86
-if expr "$uname_m" : arm >/dev/null || expr "uname_m" : aarch64 > /dev/null; then
+if expr "$uname_m" : arm >/dev/null || expr "$uname_m" : aarch64 > /dev/null; then
         excl_list_arch=arm
 fi
 cat "$DIRNAME/excludelist.local.$excl_list_arch" >> excludelist

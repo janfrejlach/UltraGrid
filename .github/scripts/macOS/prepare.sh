@@ -36,6 +36,7 @@ set -- \
         autoconf \
         automake \
         ffmpeg \
+        fluidsynth \
         glm \
         imagemagick \
         jack \
@@ -49,9 +50,8 @@ set -- \
         pkg-config \
         portaudio \
         qt \
-        sdl2 \
-        sdl2_mixer \
-        sdl2_ttf \
+        sdl3 \
+        sdl3_ttf \
         speexdsp \
         vulkan-headers \
         wolfssl \

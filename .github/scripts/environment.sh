@@ -9,6 +9,8 @@
 ## - **apple_key_p12_b64** - [mac only] base64-encoded $KEY_FILE (using
 ##                           password $KEY_FILE_PASS)
 
+set -eu
+
 if expr "$GITHUB_REF" : 'refs/tags/' >/dev/null; then
   TAG=${GITHUB_REF#refs/tags/}
   VERSION=${TAG#v}
@@ -45,6 +47,7 @@ export FEATURES="\
  --enable-caca\
  --enable-decklink\
  --enable-file\
+ --enable-fluidsynth\
  --enable-gl\
  --enable-gl-display\
  --enable-holepunch\
@@ -63,8 +66,7 @@ export FEATURES="\
  --enable-rtsp-server\
  --enable-scale\
  --enable-screen\
- --enable-sdl=2\
- --enable-sdl_mixer\
+ --enable-sdl=3\
  --enable-sdp-http\
  --enable-soxr\
  --enable-speexdsp\

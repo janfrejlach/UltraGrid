@@ -69,6 +69,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"    // for HAVE_SPOUT, HAVE_SYPHON
 #endif
+#include "compat/strings.h"      // for strcasecmp
 #include "debug.h"
 #include "gl_context.h"
 #include "host.h"
@@ -365,6 +366,18 @@ static constexpr pair<int64_t, string_view> keybindings[] = {
         pair<int64_t, string_view>{K_CTRL_UP, "make window 10% bigger"}
 };
 
+#ifdef GLFW_PLATFORM
+const static struct {
+        int platform_id;
+        const char *name;
+} platform_map[] = {
+        { GLFW_PLATFORM_WIN32,   "Win32"   },
+        { GLFW_PLATFORM_COCOA,   "Cocoa"   },
+        { GLFW_PLATFORM_WAYLAND, "Wayland" },
+        { GLFW_PLATFORM_X11,     "X11"     },
+};
+#endif // defined GLFW_PLATFORM
+
 /* Prototyping */
 static bool check_display_gl_version(bool print_ver);
 static bool display_gl_init_opengl(struct state_gl *s);
@@ -528,7 +541,52 @@ static void gl_print_monitors(bool fullhelp) {
         if (!fullhelp) {
                 cout << "(use \"fullhelp\" to see modes)\n";
         }
+        printf("\n");
 }
+
+#ifdef GLFW_PLATFORM
+static void
+gl_print_platforms()
+{
+        printf("available platforms:\n");
+        for (unsigned i = 0; i < ARR_COUNT(platform_map); ++i) {
+                if (glfwPlatformSupported(platform_map[i].platform_id)) {
+                        color_printf("\t- " TBOLD("%s") "\n", platform_map[i].name);
+                }
+        }
+        color_printf("\n");
+}
+
+static void
+gl_print_current_platform()
+{
+        const int platform = glfwGetPlatform();
+        const char *name = "UNKNOWN/ERROR";
+        for (unsigned i = 0; i < ARR_COUNT(platform_map); ++i) {
+                if (platform_map[i].platform_id == platform) {
+                        name = platform_map[i].name;
+                        break;
+                }
+        }
+#ifdef __linux__
+        int ll = LOG_LEVEL_NOTICE;
+#else
+        int ll = LOG_LEVEL_VERBOSE;
+#endif
+        log_msg(ll, MOD_NAME "Using platform: %s\n", name);
+}
+#else // mot defined GLFW_PLATFORM
+static void
+gl_print_platforms()
+{
+        MSG(ERROR, "platforms unsupported (old GLFW)\n");
+}
+// NOOP
+static void
+gl_print_current_platform()
+{
+}
+#endif // not defined GLFW_PLATFORM
 
 #define FEATURE_PRESENT(x) (strcmp(STRINGIFY(x), "1") == 0 ? "on" : "off")
 
@@ -590,6 +648,7 @@ static void gl_show_help(bool full) {
                 col() << TBOLD("\t--param " GL_DISABLE_10B_OPT_PARAM_NAME)     << "\tdo not set 10-bit framebuffer (performance issues)\n";
                 col() << "\n" TBOLD(
                     "[1]") " position doesn't work in Wayland\n";
+                col() << TBOLD("\tplatform=<p>")   << "\tuse platform (usable only in Linux)\n";
         } else {
                 color_printf(
                     "\t(use \"" TBOLD("fullhelp") "\" to see options)\n");
@@ -607,7 +666,9 @@ static void gl_show_help(bool full) {
                 return;
         }
         gl_print_monitors(full);
-        color_printf("\n");
+        if (full) {
+                gl_print_platforms();
+        }
         GLFWwindow *window = glfwCreateWindow(32, 32, DEFAULT_WIN_NAME, nullptr, nullptr);
         if (window != nullptr) {
                 glfwMakeContextCurrent(window);
@@ -704,6 +765,25 @@ parse_hints(struct state_gl *s, bool window_hints, char *hints)
         }
 }
 
+static bool
+set_platform(struct state_gl *s, const char *platform)
+{
+#ifdef GLFW_PLATFORM
+        for (unsigned i = 0; i < ARR_COUNT(platform_map); ++i) {
+                if (strcasecmp(platform_map[i].name, platform) == 0) {
+                        s->init_hints[GLFW_PLATFORM] = platform_map[i].platform_id;
+                        return true;
+                }
+        }
+        MSG(ERROR, "Unknown platform: %s\n", platform);
+        return false;
+#else
+        (void) s, (void)  platform;
+        MSG(ERROR, "platforms unsupported (old GLFW)\n");
+        return false;
+#endif
+}
+
 static void
 list_hints()
 {
@@ -721,7 +801,7 @@ list_hints()
                      "<https://github.com/glfw/glfw/blob/master/include/GLFW/"
                      "glfw3.h>).\n\n");
 
-        color_printf("Available hints keys and values:\n");
+        color_printf("Some of hints keys and values:\n");
         for (const auto &h : hint_map) {
                 color_printf("\t" TBOLD("%s") " - %#x\n", h.first.c_str(),
                              h.second);
@@ -732,13 +812,16 @@ list_hints()
             "Example usage: " TBOLD("-d gl:init_hint=platform=x11") "\n\n");
 }
 
-static void *display_gl_parse_fmt(struct state_gl *s, char *ptr) {
+static bool
+display_gl_parse_fmt(struct state_gl *s, char *ptr)
+{
+        bool ret = true;
         char *tok, *save_ptr = NULL;
 
         while((tok = strtok_r(ptr, ":", &save_ptr)) != NULL) {
                 if (strcmp(tok, "help") == 0 || strcmp(tok, "fullhelp") == 0) {
                         gl_show_help(strcmp(tok, "fullhelp") == 0);
-                        return INIT_NOERR;
+                        return false;
                 }
                 if (!strcmp(tok, "d") || !strcmp(tok, "dforce")) {
                         s->deinterlace = !strcmp(tok, "d") ? state_gl::deint::on : state_gl::deint::force;
@@ -784,7 +867,7 @@ static void *display_gl_parse_fmt(struct state_gl *s, char *ptr) {
                         }
 #else
                         log_msg(LOG_LEVEL_ERROR, MOD_NAME "Syphon/Spout support not compiled in.\n");
-                        return nullptr;
+                        return false;
 #endif
                 } else if (strstr(tok, "gamma=") == tok) {
                         s->gamma = stof(strchr(tok, '=') + 1);
@@ -797,9 +880,7 @@ static void *display_gl_parse_fmt(struct state_gl *s, char *ptr) {
                         s->use_pbo = strcasecmp(tok, "pbo") == 0 ? 1 : 0;
                 } else if (strstr(tok, "size=") == tok ||
                            strstr(tok, "fixed_size=") == tok) {
-                        if (!set_size(s, tok)) {
-                                return nullptr;
-                        }
+                        ret = ret && set_size(s, tok);
                 } else if (strcmp(tok, "fixed_size") == 0) {
                         s->fixed_size = true;
                 } else if (strcmp(tok, "noresizable") == 0) {
@@ -808,17 +889,19 @@ static void *display_gl_parse_fmt(struct state_gl *s, char *ptr) {
                         parse_hints(s, true, strchr(tok, '=') + 1);
                 } else if (strstr(tok, "init_hint=") == tok) {
                         parse_hints(s, false, strchr(tok, '=') + 1);
+                } else if (IS_KEY_PREFIX(tok, "platform")) {
+                        ret = ret && set_platform(s, strchr(tok, '=') + 1);
                 } else if (strcmp(tok, "list_hints") == 0) {
                         list_hints();
-                        return nullptr;
+                        return false;
                 } else {
                         log_msg(LOG_LEVEL_ERROR, MOD_NAME "Unknown option: %s\n", tok);
-                        return nullptr;
+                        return false;
                 }
                 ptr = NULL;
         }
 
-        return s;
+        return ret;
 }
 
 static void * display_gl_init(struct module *parent, const char *fmt, unsigned int flags) {
@@ -833,16 +916,16 @@ static void * display_gl_init(struct module *parent, const char *fmt, unsigned i
 
         if (fmt != NULL) {
                 char *tmp = strdup(fmt);
-                void *ret = nullptr;
+                bool ret = false;
                 try {
                         ret = display_gl_parse_fmt(s, tmp);
                 } catch (std::invalid_argument &e) {
                         LOG(LOG_LEVEL_ERROR) << MOD_NAME << "Invalid numeric value for an option!\n";
                 }
                 free(tmp);
-                if (ret != s) { // ret is either nullptr or INIT_NOERR (help requested)
+                if (!ret) {
                         delete s;
-                        return ret;
+                        return strstr(fmt, "help") == nullptr ? nullptr : INIT_NOERR;
                 }
         }
 
@@ -1302,7 +1385,6 @@ static void gl_process_frames(struct state_gl *s)
                 free_message(msg, r);
         }
 
-
         if (s->show_cursor == state_gl::SC_AUTOHIDE) {
                 if (s->cursor_shown_from != steady_clock::time_point()) {
                         const auto now = steady_clock::now();
@@ -1543,14 +1625,28 @@ static void display_gl_render_last(GLFWwindow *win) {
 #ifndef GLEW_ERROR_NO_GLX_DISPLAY
 #define GLEW_ERROR_NO_GLX_DISPLAY 4
 #endif
-static const char *glewGetError(GLenum err) {
+static void printGlewError(GLenum err) {
+        const char *err_str = nullptr;
         switch (err) {
-                case GLEW_ERROR_NO_GL_VERSION: return "missing GL version";
-                case GLEW_ERROR_GL_VERSION_10_ONLY: return "Need at least OpenGL 1.1";
-                case GLEW_ERROR_GLX_VERSION_11_ONLY: return "Need at least GLX 1.2";
-                case GLEW_ERROR_NO_GLX_DISPLAY: return "Need GLX display for GLX support";
-                default: return (const char *) glewGetErrorString(err);
+        case GLEW_ERROR_NO_GL_VERSION:
+                err_str = "missing GL version";
+                break;
+        case GLEW_ERROR_GL_VERSION_10_ONLY:
+                err_str = "Need at least OpenGL 1.1";
+                break;
+        case GLEW_ERROR_GLX_VERSION_11_ONLY:
+                err_str = "Need at least GLX 1.2";
+                break;
+        case GLEW_ERROR_NO_GLX_DISPLAY:
+                err_str = "Need GLX display for GLX support";
+                break;
+        default:
+                err_str = (const char *) glewGetErrorString(err);
+                break;
         }
+        log_msg(err == GLEW_ERROR_NO_GLX_DISPLAY ? LOG_LEVEL_VERBOSE
+                                                 : LOG_LEVEL_ERROR,
+                MOD_NAME "GLEW Error: %s (err %d)\n", err_str, err);
 }
 #endif // defined GLEW_VERSION
 
@@ -1713,6 +1809,8 @@ static bool display_gl_init_opengl(struct state_gl *s)
                 return false;
         }
 
+        gl_print_current_platform();
+
         if (s->req_monitor_idx != -1) {
                 int           count = 0;
                 GLFWmonitor **mon   = glfwGetMonitors(&count);
@@ -1781,7 +1879,7 @@ static bool display_gl_init_opengl(struct state_gl *s)
 
 #if defined GLEW_VERSION
         if (GLenum err = glewInit()) {
-                log_msg(LOG_LEVEL_ERROR, MOD_NAME "GLEW Error: %s (err %d)\n", glewGetError(err), err);
+                printGlewError(err);
                 if (err != GLEW_ERROR_NO_GLX_DISPLAY) { // do not fail on error 4 (on Wayland), which can be suppressed
                         return false;
                 }
