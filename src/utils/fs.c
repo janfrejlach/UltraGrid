@@ -40,15 +40,35 @@
 #include "config.h"
 #include "config_unix.h"
 #include "config_win32.h"
+#else
+#define SRCDIR ".."
 #endif
 
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
+#include "debug.h"
 #include "utils/fs.h"
+#include "utils/macros.h"
 #include "utils/string.h"
+
+// for get_exec_path
+#ifdef __APPLE__
+#include <mach-o/dyld.h> //_NSGetExecutablePath
+#include <unistd.h>
+#elif defined __FreeBSD__
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#elif !defined(_WIN32) && !defined(__linux__) && !defined(__DragonFly__) && \
+    !defined(__NetBSD__)
+#include <unistd.h>     // for getcwd
+#include "host.h"       // for uv_argv
+#endif
+
+#define MOD_NAME "[fs] "
 
 /**
  * Returns temporary path ending with path delimiter ('/' or '\' in Windows)
@@ -79,28 +99,22 @@ const char *get_temp_dir(void)
         return temp_dir;
 }
 
-// see also <https://stackoverflow.com/a/1024937>
+/**
+ * see also <https://stackoverflow.com/a/1024937>
+ * @param path buffer with size MAX_PATH_SIZE where function stores path to executable
+ */
+static bool
+get_exec_path(char *path)
+{
 #ifdef _WIN32
-int get_exec_path(char* path) {
         return GetModuleFileNameA(NULL, path, MAX_PATH_SIZE) != 0;
-}
 #elif defined __linux__
-int get_exec_path(char* path) {
         return realpath("/proc/self/exe", path) != NULL;
-}
 #elif defined __DragonFly__
-int get_exec_path(char* path) {
         return realpath("/proc/curproc/file", path) != NULL;
-}
 #elif defined __NetBSD__
-int get_exec_path(char* path) {
         return realpath("/proc/curproc/exe", path) != NULL;
-}
 #elif defined __APPLE__
-#include <mach-o/dyld.h> //_NSGetExecutablePath
-#include <unistd.h>
-
-int get_exec_path(char* path) {
         char raw_path_name[MAX_PATH_SIZE];
         uint32_t raw_path_size = (uint32_t)(sizeof(raw_path_name));
 
@@ -108,64 +122,58 @@ int get_exec_path(char* path) {
             return false;
         }
         return realpath(raw_path_name, path) != NULL;
-}
 #elif defined __FreeBSD__
-#include <sys/sysctl.h>
-#include <sys/types.h>
-int get_exec_path(char* path) {
         int    mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
         size_t cb    = MAX_PATH_SIZE;
-        return sysctl(mib, sizeof mib / sizeof mib[0], path, &cb, NULL, 0);
-}
+        return sysctl(mib, sizeof mib / sizeof mib[0], path, &cb, NULL, 0) == 0;
 #else
-#include <unistd.h>     // for getcwd
-#include "host.h"       // for uv_argv
-int get_exec_path(char* path) {
         if (uv_argv[0][0] == '/') { // with absolute path
                 if (snprintf(path, MAX_PATH_SIZE, "%s", uv_argv[0]) ==
                     MAX_PATH_SIZE) {
-                        return -1; // truncated
+                        return false; // truncated
                 }
-                return 0;
+                return true;
         }
         if (strchr(uv_argv[0], '/') != NULL) { // or with relative path
                 char cwd[MAX_PATH_SIZE];
                 if (getcwd(cwd, sizeof cwd) != cwd) {
-                        return -1;
+                        return false;
                 }
                 if (snprintf(path, MAX_PATH_SIZE, "%s/%s", cwd, uv_argv[0]) ==
                     MAX_PATH_SIZE) {
-                        return -1; // truncated
+                        return false; // truncated
                 }
-                return 0;
+                return true;
         }
         // else launched from PATH
         char args[1024];
         snprintf(args, sizeof args, "command -v %s", uv_argv[0]);
         FILE *f = popen(args, "r");
         if (f == NULL) {
-                return -1;
+                return false;
         }
         if (fgets(path, MAX_PATH_SIZE, f) == NULL) {
                 fclose(f);
-                return -1;
+                return false;
         }
         fclose(f);
         if (strlen(path) == 0 || path[strlen(path) - 1] != '\n') {
-                return -1; // truncated (?)
+                return false; // truncated (?)
         }
         path[strlen(path) - 1] = '\0';
-        return 0;
+        return true;
 }
-#endif  
+#endif
+}
 
 /**
  * @returns  installation root without trailing '/', eg. installation prefix on
  *           Linux - default "/usr/local", Windows - top-level directory extracted
  *           UltraGrid directory
  */
-const char *get_install_root(void) {
-        static __thread char exec_path[MAX_PATH_SIZE];
+static bool
+get_install_root(char exec_path[static MAX_PATH_SIZE])
+{
         if (!get_exec_path(exec_path)) {
                 return NULL;
         }
@@ -176,12 +184,69 @@ const char *get_install_root(void) {
         *last_path_delim = '\0'; // cut off executable name
         last_path_delim = strrpbrk(exec_path, "/\\");
         if (!last_path_delim) {
-                return exec_path;
+                return true;
         }
         if (strcmp(last_path_delim + 1, "bin") == 0 || strcmp(last_path_delim + 1, "MacOS") == 0) {
                 *last_path_delim = '\0'; // remove "bin" suffix if there is one (not in Windows builds) or MacOS in a bundle
         }
-        return exec_path;
+        return true;
+}
+
+bool
+file_exists(const char *path, enum check_file_type type)
+{
+        struct stat sb;
+        if (stat(path, &sb) == -1) {
+                return false;
+        }
+        switch (type) {
+        case FT_ANY:
+                return true;
+        case FT_REGULAR:
+                return S_ISREG(sb.st_mode);
+        case FT_DIRECTORY:
+                return S_ISDIR(sb.st_mode);
+        }
+        abort();
+}
+
+/**
+ * returns path with UltraGrid data (path to `share/ultragrid` if run from
+ * source, otherwise the corresponding path in system if installed or in
+ * bundle/appimage/extracted dir)
+ * @retval the path; NULL if not found
+ */
+const char *
+get_ug_data_path()
+{
+        static __thread char path[MAX_PATH_SIZE];
+        if (strlen(path) > 0) { // already set
+                return path;
+        }
+
+        const char suffix[] = "/share/ultragrid";
+
+        if (get_install_root(path)) {
+                size_t len = sizeof path - strlen(path);
+                if ((size_t) snprintf(path + strlen(path), len,
+                                      suffix) >= len) {
+                        abort(); // path truncated
+                }
+                if (file_exists(path, FT_DIRECTORY)) {
+                        MSG(VERBOSE, "Using data path %s\n", path);
+                        return path;
+                }
+        }
+
+        snprintf_ch(path, SRCDIR "%s", suffix);
+        if (file_exists(path, FT_DIRECTORY)) {
+                MSG(VERBOSE, "Using data path %s\n", path);
+                return path;
+        }
+
+        MSG(WARNING, "No data path could have been found!\n");
+        path[0] = '\0'; // avoid quick cached return at start
+        return NULL;
 }
 
 /**

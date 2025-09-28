@@ -109,6 +109,15 @@ constexpr int magic_vulkan_sdl2 = 0x3cc234a2;
 constexpr int initial_frame_count = 0;
 #define MOD_NAME "[VULKAN_SDL2] "
 
+#define SDL_CHECK(cmd, ...) \
+        do { \
+                int ret = cmd; \
+                if (ret < 0) { \
+                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "Error (%s): %s\n", \
+                                #cmd, SDL_GetError()); \
+                        __VA_ARGS__; \
+                } \
+        } while (0)
 
 void display_vulkan_new_message(module*);
 video_frame* display_vulkan_getf(void* state);
@@ -283,9 +292,11 @@ constexpr bool display_vulkan_process_key(state_vulkan_sdl2& s, int64_t key) {
                 case 'f': {
                         s.fullscreen = !s.fullscreen;
                         int mouse_x = 0, mouse_y = 0;
-                        SDL_GetGlobalMouseState(&mouse_x, &mouse_y);
-                        SDL_SetWindowFullscreen(s.window, s.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-                        SDL_WarpMouseGlobal(mouse_x, mouse_y);
+                        SDL_CHECK(SDL_GetGlobalMouseState(&mouse_x, &mouse_y));
+                        SDL_CHECK(SDL_SetWindowFullscreen(
+                            s.window,
+                            s.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+                        SDL_CHECK(SDL_WarpMouseGlobal(mouse_x, mouse_y));
                         return true;
                 }
                 case 'q':
@@ -584,7 +595,7 @@ struct command_line_arguments {
         bool tearing_permitted = false;
         bool validation = false;
 
-        int display_idx = 0;
+        int display_idx = -1;
         int x = SDL_WINDOWPOS_UNDEFINED;
         int y = SDL_WINDOWPOS_UNDEFINED;
 
@@ -644,12 +655,12 @@ bool parse_command_line_arguments(command_line_arguments& args, state_vulkan_sdl
                         constexpr auto pos = "driver="sv.size();
                         args.driver = std::string{ token.substr(pos) };
                 } else if (starts_with(token, "gpu=")) {
-                        if (token == "integrated"sv) {
+                        constexpr auto pos = "gpu="sv.size();
+                        if (token.substr(pos) == "integrated"sv) {
                                 args.gpu_idx = vulkan_display::gpu_integrated;
-                        } else if (token == "discrete"sv) {
+                        } else if (token.substr(pos) == "discrete"sv) {
                                 args.gpu_idx = vulkan_display::gpu_discrete;
                         } else {
-                                constexpr auto pos = "gpu="sv.size();
                                 args.gpu_idx = svtoi(token.substr(pos));
                         }
                 } else if (starts_with(token, "pos=")) {
@@ -691,6 +702,24 @@ bool parse_command_line_arguments(command_line_arguments& args, state_vulkan_sdl
                 return false;
         }
         return true;
+}
+
+void
+vulkan_sdl2_validate_params(state_vulkan_sdl2            *s,
+                            const command_line_arguments *args)
+{
+        if (strcmp(SDL_GetCurrentVideoDriver(), "wayland") != 0) {
+                return;
+        }
+        if (args->display_idx != -1 && !s->fullscreen) {
+                MSG(WARNING, "In Wayland, display specification is available "
+                           "only together with fullscreen flag ':fs'!\n");
+        }
+        if (args->x != SDL_WINDOWPOS_UNDEFINED ||
+            args->y != SDL_WINDOWPOS_UNDEFINED) {
+                MSG(WARNING,
+                    "Window positon should not be specified with Wayland!\n");
+        }
 }
 
 void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
@@ -739,8 +768,9 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
                 window_title = get_commandline_param("window-title");
         }
 
-        int x = (args.x == SDL_WINDOWPOS_UNDEFINED ? SDL_WINDOWPOS_CENTERED_DISPLAY(args.display_idx) : args.x);
-        int y = (args.y == SDL_WINDOWPOS_UNDEFINED ? SDL_WINDOWPOS_CENTERED_DISPLAY(args.display_idx) : args.y);
+        int display_idx = args.display_idx == -1 ? 0 : args.display_idx;
+        int x = (args.x == SDL_WINDOWPOS_UNDEFINED ? SDL_WINDOWPOS_CENTERED_DISPLAY(display_idx) : args.x);
+        int y = (args.y == SDL_WINDOWPOS_UNDEFINED ? SDL_WINDOWPOS_CENTERED_DISPLAY(display_idx) : args.y);
         if(s->width == -1 && s->height == -1){
                 SDL_DisplayMode mode;
                 int display_index = 0;
@@ -762,6 +792,7 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
                 window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
         }
 
+        vulkan_sdl2_validate_params(s.get(), &args);
         s->window = SDL_CreateWindow(window_title, x, y, s->width, s->height, window_flags);
         if (!s->window) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Unable to create window : %s\n", SDL_GetError());
@@ -946,7 +977,7 @@ void display_vulkan_new_message(module* mod) {
 
         SDL_Event event{};
         event.type = s->sdl_user_new_message_event;
-        SDL_PushEvent(&event);
+        SDL_CHECK(SDL_PushEvent(&event));
 }
 
 

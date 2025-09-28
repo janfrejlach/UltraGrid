@@ -58,42 +58,55 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "config_unix.h"
-#include "config_win32.h"
 #endif // HAVE_CONFIG_H
 
-#include <array>
+#include <algorithm>                    // for max, min
+#include <cassert>                      // for assert
+#include <cctype>                       // for toupper
 #include <chrono>
-#include <cmath>                        // for floor
+#include <climits>                      // for INT_MIN
+#include <csignal>                      // for signal, SIGPIPE, SIG_DFL, SIGHUP
+#include <cstdint>                      // for UINT16_MAX, uint32_t
+#include <cstdio>                       // for printf, perror, fprintf, stderr
 #include <cstdlib>
+#include <cstring>                      // for strcmp, strlen, strtok_r, strchr
+#include <exception>                    // for exception
 #include <getopt.h>
 #include <iostream>
-#include <list>
+#include <map>                          // for map
 #include <memory>
-#include <mutex>
 #include <pthread.h>
 #include <stdexcept>
 #include <string>
-#include <string.h>
-#include <thread>
-#include <tuple>
+#include <string_view>                  // for operator==, basic_string_view
+#include <unistd.h>                     // for optarg, optind, STDERR...
+#include <unordered_map>                // for unordered_map
 #include <utility>                      // for move
+#include <vector>                       // for vector
 
-#include "compat/misc.h"
+#include "audio/audio.h"                // for audio_options, additional_aud...
+#include "audio/audio_capture.h"        // for audio_capture_get_vidcap_flags
+#include "audio/audio_playback.h"       // for audio_playback_help
+#include "audio/codec.h"                // for audio_codec_params, get_name_...
+#include "audio/types.h"                // for AC_NONE, AUDIO_FRAME_DISPOSE
+#include "compat/alarm.h"               // for alarm
+#include "compat/strings.h"             // for strcasecmp
 #include "control_socket.h"
 #include "cuda_wrapper.h"
 #include "debug.h"
+#include "export.h"                     // for export_destroy, export_init
 #include "host.h"
 #include "keyboard_control.h"
 #include "lib_common.h"
-#include "messaging.h"
 #include "module.h"
 #include "playback.h"
 #include "rtp/rtp.h"
 #include "rtsp/rtsp_utils.h"
 #include "tv.h"
+#include "types.h"                      // for video_frame, video_frame_call...
 #include "ug_runtime_error.hpp"
 #include "utils/color_out.h"
+#include "utils/macros.h"               // for snprintf_ch, to_fourcc
 #include "utils/misc.h"
 #include "utils/nat.h"
 #include "utils/net.h"
@@ -101,19 +114,13 @@
 #include "utils/string.h"
 #include "utils/string_view_utils.hpp"
 #include "utils/thread.h"
-#include "utils/wait_obj.h"
 #include "utils/udp_holepunch.h"
+#include "utils/wait_obj.h"             // for wait_obj_done, wait_obj_init
 #include "video.h"
 #include "video_capture.h"
+#include "video_capture_params.h"       // for vidcap_params_get_driver, vid...
 #include "video_display.h"
-#include "video_compress.h"
-#include "export.h"
 #include "video_rxtx.hpp"
-#include "audio/audio.h"
-#include "audio/audio_capture.h"
-#include "audio/audio_playback.h"
-#include "audio/codec.h"
-#include "audio/utils.h"
 
 #define MOD_NAME                "[main] "
 #define PORT_BASE               5004
@@ -1270,6 +1277,43 @@ static int adjust_params(struct ug_options *opt) {
                 opt->bitrate = opt->bitrate == RATE_DEFAULT ? RATE_DYNAMIC : opt->bitrate;
         }
 
+        return 0;
+}
+
+/// warn about unused options or not recommended options or agruments
+static void
+validate_params(struct ug_options *opt)
+{
+        if (opt->vidcap_params_head == opt->vidcap_params_tail) {
+                if (opt->requested_compression != nullptr) {
+                        MSG(WARNING,
+                            "Video compression set but no vidcap given!\n");
+                }
+                if (vidcap_params_get_capture_filter(opt->vidcap_params_tail) != nullptr) {
+                        MSG(WARNING, "Video capture filter specified but not capturing!\n");
+                }
+                if (strcmp(opt->requested_video_fec, "none") != 0) {
+                        MSG(WARNING, "Video FEC specified but not capturing!\n");
+                }
+        }
+
+        if (strcmp(opt->requested_display, "none") == 0) {
+                if (opt->postprocess != nullptr) {
+                        MSG(WARNING, "Video postprocess specified without a display!\n");
+                }
+        }
+
+        if (strcmp(opt->audio.send_cfg, ug_options().audio.send_cfg) == 0) {
+                if (strcmp(opt->audio.fec_cfg, ug_options().audio.fec_cfg) != 0) {
+                        MSG(WARNING,
+                            "Audio FEC specified but not capturing!\n");
+                }
+                if (opt->audio.codec_cfg != nullptr) {
+                        MSG(WARNING,
+                            "Audio compression specified but not capturing!\n");
+                }
+        }
+
         if((strcmp("none", opt->audio.send_cfg) != 0 || strcmp("none", opt->audio.recv_cfg) != 0) && strcmp(opt->video_protocol, "rtsp") == 0){
             //TODO: to implement a high level rxtx struct to manage different standards (i.e.:H264_STD, VP8_STD,...)
             if (strcmp(opt->audio.proto, "rtsp") != 0) {
@@ -1279,9 +1323,8 @@ static int adjust_params(struct ug_options *opt) {
         if (strcmp(opt->audio.proto, "rtsp") == 0 && strcmp(opt->video_protocol, "rtsp") != 0) {
                 LOG(LOG_LEVEL_WARNING) << "Using RTSP for audio but not for video is not recommended and might not work.\n";
         }
-
-        return 0;
 }
+
 
 #define EXIT(expr) { int rc = expr; common_cleanup(init); return rc; }
 
@@ -1330,6 +1373,9 @@ int main(int argc, char *argv[])
                 EXIT(ret < 0 ? -ret : EXIT_SUCCESS);
         }
 
+        if (!show_help) {
+                validate_params(&opt);
+        }
         if (int ret = adjust_params(&opt)) {
                 EXIT(ret);
         }

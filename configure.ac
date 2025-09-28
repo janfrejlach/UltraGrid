@@ -1360,7 +1360,7 @@ fi
 
 sdl_version=${sdl_version:-0}
 
-ENSURE_FEATURE_PRESENT([$sdl_req], [$sdl], [SDL requested but found any version])
+ENSURE_FEATURE_PRESENT([$sdl_req], [$sdl], [SDL requested but not found])
 
 # ------------------------------------------------------------------------------
 # Vulkan
@@ -2772,9 +2772,14 @@ if test $jack_trans_req != no || test $jack_req != no; then
         AC_CHECK_HEADER(jack/jack.h, FOUND_JACK_H=yes, FOUND_JACK_H=no)
 fi
 
+if test "${system?}" != Windows; then
+        JACK_LIBS=-ldl
+fi
+
 if test "${jack_trans_req?}" != no && test "${FOUND_JACK_H?}" = yes
 then
         OBJS="$OBJS src/audio/jack.o"
+        LIBS="$LIBS${JACK_LIBS:+ $JACK_LIBS}"
         AC_DEFINE([HAVE_JACK_TRANS], [1], [Build with JACK transport support])
         jack_trans=yes
 fi
@@ -2784,8 +2789,8 @@ then
     JACK_CAP_OBJ="src/audio/capture/jack.o"
     JACK_PLAY_OBJ="src/audio/playback/jack.o"
     jack=yes
-    add_module acap_jack "$JACK_CAP_OBJ"
-    add_module aplay_jack "$JACK_PLAY_OBJ"
+    add_module acap_jack "$JACK_CAP_OBJ" "${JACK_LIBS-}"
+    add_module aplay_jack "$JACK_PLAY_OBJ" "${JACK_LIBS-}"
 fi
 
 ENSURE_FEATURE_PRESENT([$jack_req], [$jack], [JACK not found])
@@ -3434,37 +3439,7 @@ fi
 ENSURE_FEATURE_PRESENT([$pcp_req], [$pcp], [PCP not found])
 
 # ---------------------------------------------------------------------
-# SDL_mixer audio capture
-# ---------------------------------------------------------------------
-AC_ARG_ENABLE(sdl_mixer,
-              AS_HELP_STRING([--disable-sdl_mixer], [disable SDL_mixer audio capture (default is auto)]
-              [Requires: SDL[2]_mixer]),
-              [sdl_mixer_req=$enableval],
-              [sdl_mixer_req=$build_default])
-found_sdl_mixer=no
-sdl_mixer=no
-
-if test $sdl = yes && test $sdl_mixer_req != no
-then
-        if test "$sdl_version" -lt 3; then
-                PKG_CHECK_MODULES([SDL_MIXER], [SDL${sdl_ver_suffix}_mixer],
-                                  [found_sdl_mixer=yes], [found_sdl_mixer=no])
-        elif test "$sdl_mixer_req" = yes; then
-                AC_MSG_ERROR([SDL_mixer 3 no longer supports MIDI playback so it can be no longer used!]);
-        fi
-        if test "$found_sdl_mixer" = yes; then
-                SDL_MIXER_LIBS=$(remove_mwindows "$SDL_MIXER_LIBS")
-                SDL_MIXER_CFLAGS=$($PKG_CONFIG --cflags-only-I SDL${sdl_ver_suffix}_mixer)
-                add_module acap_sdl_mixer src/audio/capture/sdl_mixer.o "$SDL_MIXER_LIBS"
-                INC="$INC${SDL_MIXER_CFLAGS:+ $SDL_MIXER_CFLAGS}"
-                sdl_mixer=yes
-        fi
-fi
-
-ENSURE_FEATURE_PRESENT([$sdl_mixer_req], [$sdl_mixer], [SDL_mixer deps not found!])
-
-# ---------------------------------------------------------------------
-# fluidsynt audio capture synthesizer
+# fluidsynth audio capture synthesizer
 # ---------------------------------------------------------------------
 AC_ARG_ENABLE(fluidsynth,
               AS_HELP_STRING([--disable-fluidsynth],
@@ -3537,6 +3512,7 @@ if test "$build_default" != no || test "$req_files" = all; then
         src/capture_filter/matrix.o
         src/capture_filter/matrix2.o
         src/capture_filter/mirror.o
+        src/capture_filter/noise.o
         src/capture_filter/override_prop.o
         src/capture_filter/preview.o
         src/capture_filter/ratelimit.o
@@ -3625,7 +3601,7 @@ end_section() {
 add_column() {
         PAD_DOTS=31
         # left column
-        if [ test $4 = 0 ]; then
+        if test "${4?}" -eq 0; then
                 printf "$1\n  $2 $(for n in `seq ${#2} $PAD_DOTS`; do printf .; done) $(printf %-3s $3)"
                 return 1
         else
@@ -3664,7 +3640,6 @@ RESULT=`add_column "$RESULT" "CoreAudio" $coreaudio $?`
 RESULT=`add_column "$RESULT" "FluidSynth" $fluidsynth $?`
 RESULT=`add_column "$RESULT" "JACK" $jack $?`
 RESULT=`add_column "$RESULT" "JACK transport" $jack_trans $?`
-RESULT=`add_column "$RESULT" "SDL_mixer" $sdl_mixer $?`
 RESULT=`add_column "$RESULT" "Pipewire" $pipewire_audio $?`
 RESULT=`add_column "$RESULT" "Portaudio" $portaudio $?`
 RESULT=`add_column "$RESULT" "WASAPI" $wasapi $?`

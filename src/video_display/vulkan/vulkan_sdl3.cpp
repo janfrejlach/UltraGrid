@@ -44,10 +44,11 @@
    * * audio (would be perhaps better as an audio playback device)
    */
 
-#include <cmath>                                           // for sqrt
 #include <cctype>                                          // for toupper
+#include <cmath>                                           // for sqrt
 #include <cstdio>                                          // for sscanf
 #include <cstdlib>                                         // for calloc
+#include <cstring>                                         // for strchr, strcmp
 
 #include "debug.h"
 #include "host.h"
@@ -56,6 +57,7 @@
 #include "messaging.h"
 #include "module.h"
 #include "utils/color_out.h"
+#include "utils/macros.h"                                  // for IS_KEY_PREFIX
 #include "video_display.h"
 #include "video_display/splashscreen.h"
 #include "video.h"
@@ -101,6 +103,14 @@ constexpr int magic_vulkan_sdl3 = 0x33536b56; // 'VkS3'
 constexpr int initial_frame_count = 0;
 #define MOD_NAME "[Vulkan SDL3] "
 
+#define SDL_CHECK(cmd, ...) \
+        do { \
+                if (!(cmd)) { \
+                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "Error (%s): %s\n", \
+                                #cmd, SDL_GetError()); \
+                        __VA_ARGS__; \
+                } \
+        } while (0)
 
 void display_vulkan_new_message(module*);
 video_frame* display_vulkan_getf(void* state);
@@ -115,7 +125,7 @@ public:
                 assert(window);
                 int width = 0;
                 int height = 0;
-                SDL_GetWindowSizeInPixels(window, &width, &height);
+                SDL_CHECK(SDL_GetWindowSizeInPixels(window, &width, &height));
                 if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) {
                         width = 0;
                         height = 0;
@@ -282,8 +292,8 @@ constexpr bool display_vulkan_process_key(state_vulkan_sdl3& s, int64_t key) {
                         s.fullscreen = !s.fullscreen;
                         float mouse_x = 0, mouse_y = 0;
                         SDL_GetGlobalMouseState(&mouse_x, &mouse_y);
-                        SDL_SetWindowFullscreen(s.window, s.fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
-                        SDL_WarpMouseGlobal(mouse_x, mouse_y);
+                        SDL_CHECK(SDL_SetWindowFullscreen(s.window, s.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+                        SDL_CHECK(SDL_WarpMouseGlobal(mouse_x, mouse_y));
                         return true;
                 }
                 case 'q':
@@ -306,7 +316,7 @@ void process_user_messages(state_vulkan_sdl3& s) {
                 response* r = nullptr;
                 int key;
                 if (strstr(msg->text, "win-title ") == msg->text) {
-                        SDL_SetWindowTitle(s.window, msg->text + strlen("win-title "));
+                        SDL_CHECK(SDL_SetWindowTitle(s.window, msg->text + strlen("win-title ")));
                         r = new_response(RESPONSE_OK, NULL);
                 } else if (sscanf(msg->text, "%d", &key) == 1) {
                         if (!display_vulkan_process_key(s, key)) {
@@ -365,7 +375,7 @@ void process_events(state_vulkan_sdl3& s) {
                         }
                         s.width = width;
                         s.height = height;
-                        SDL_SetWindowSize(s.window, width, height);
+                        SDL_CHECK(SDL_SetWindowSize(s.window, width, height));
                         debug_msg(MOD_NAME "resizing to %d x %d\n", width, height);
                 } else if (sdl_event.type == SDL_EVENT_WINDOW_RESIZED)
                 {
@@ -394,14 +404,14 @@ void display_vulkan_run(void* state) {
                 auto now = chrono::steady_clock::now();
                 double seconds = chrono::duration<double>{ now - s->time }.count();
                 if (seconds > 5) {
-                        double fps = s->frames / seconds;
-                        log_msg(LOG_LEVEL_INFO, MOD_NAME "%llu frames in %g seconds = %g FPS\n",
-                                static_cast<long long unsigned>(s->frames), seconds, fps);
+                        display_print_fps(MOD_NAME, seconds, (int) s->frames,
+                                          s->current_desc.fps);
+
                         s->time = now;
                         s->frames = 0;
                 }
         }
-        SDL_HideWindow(s->window);
+        SDL_CHECK(SDL_HideWindow(s->window));
 
 }
 
@@ -416,7 +426,7 @@ void sdl3_print_displays() {
                 if (dname == nullptr) {
                         dname = SDL_GetError();
                 }
-                col() << SBOLD(displays[i]) << " - " << dname;
+                col() << SBOLD(i) << " - " << dname << " (ID: " << displays[i] << ")" ;
         }
         std::cout << "\n";
 }
@@ -441,7 +451,7 @@ void print_gpus() {
 }
 
 void show_help() {
-        SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
+        SDL_CHECK(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS));
 
         auto print_drivers = []() {
                 for (int i = 0; i < SDL_GetNumVideoDrivers(); ++i) {
@@ -452,7 +462,7 @@ void show_help() {
         
         col() << "VULKAN_SDL3 options:\n";
         col() << SBOLD(SRED("\t-d vulkan")
-                        << "[:d|:fs|:keep-aspect|:nocursor|:nodecorate|:novsync|:tearing|:validation|:display=<dis_id>|"
+                        << "[:d|:fs|:keep-aspect|:nocursor|:nodecorate|:novsync|:tearing|:validation|:display=<d>|"
                         ":driver=<drv>|:gpu=<gpu_id>|:pos=<x>,<y>|:size=<W>x<H>|:window_flags=<f>|:help])") << "\n";
 
         col() << ("\twhere:\n");
@@ -467,7 +477,7 @@ void show_help() {
         col() << SBOLD("\t         tearing") << " - permits screen tearing\n";
         col() << SBOLD("\t      validation") << " - enable vulkan validation layers\n";
 
-        col() << SBOLD("\tdisplay=<dis_id>") << " - display index, available indices: ";
+        col() << SBOLD("\t     display=<d>") << " - display index or ID, available indices: ";
         sdl3_print_displays();
         col() << SBOLD("\t    driver=<drv>") << " - available drivers: ";
         print_drivers();
@@ -581,11 +591,6 @@ void draw_splashscreen(state_vulkan_sdl3& s) {
         catch (std::exception& e) { log_and_exit_uv(e); }
 }
 
-// todo C++20: replace with member function
-constexpr bool starts_with(std::string_view str, std::string_view match){
-        return str.rfind(match, /*check only 0-th pos*/ 0) == 0;
-};
-
 struct command_line_arguments {
         bool cursor = true;
         bool help = false;
@@ -593,7 +598,7 @@ struct command_line_arguments {
         bool tearing_permitted = false;
         bool validation = false;
 
-        int display_idx = 0;
+        int display_idx = -1;
         int x = SDL_WINDOWPOS_UNDEFINED;
         int y = SDL_WINDOWPOS_UNDEFINED;
 
@@ -602,94 +607,84 @@ struct command_line_arguments {
         std::string driver{};
 };
 
-bool parse_command_line_arguments(command_line_arguments& args, state_vulkan_sdl3& s, std::string_view arguments_sv) {
-        constexpr auto npos = std::string_view::npos;
+bool parse_command_line_arguments(command_line_arguments& args, state_vulkan_sdl3& s, char *fmt) {
         constexpr std::string_view wrong_option_msg = MOD_NAME "Wrong option: ";
 
-        // todo C++20: replace with std::views::split(options, ":")
-        auto next_token = [](std::string_view & options) -> std::string_view {
-                auto colon_pos = options.find(':');
-                auto token = options.substr(0, colon_pos);
-                options.remove_prefix(colon_pos == npos ? options.size() : colon_pos + 1);
-                return token;
-        };
-        
-        while (!arguments_sv.empty()) try {
-                const std::string_view token = next_token(arguments_sv);
-                if (token.empty()) {
-                        continue;
-                }
-
-                //svtoi = string_view to int
-                auto svtoi = [token](std::string_view str) -> int {
+        char *token = nullptr;
+        char *saveptr = nullptr;
+        while ((token = strtok_r(fmt, ":", &saveptr))) try {
+                fmt = nullptr;
+                //cstoi = cstring to int (checked)
+                auto cstoi = [token](const char *cstr,
+                                     size_t      exp_size = 0) -> int {
                         std::size_t endpos = 0;
-                        int result = std::stoi(std::string(str), &endpos, 0);
-                        if (endpos != str.size()) {
-                                throw std::runtime_error{ std::string(token) };
+                        int result = std::stoi(cstr, &endpos, 0);
+                        if (exp_size == 0) {
+                                exp_size = strlen(cstr);
+                        }
+                        if (endpos != exp_size) {
+                                throw std::runtime_error{
+                                        std::string(token) +
+                                        " (error parsing number)"
+                                };
                         }
                         return result;
                 };
-
-                if (token == "d") {
+                if (strcmp(token, "help") == 0) {
+                        show_help();
+                        args.help = true;
+                } else if (strcmp(token, "d") == 0) {
                         s.deinterlace = true;
-                } else if (token == "fs") {
+                } else if (strcmp(token, "fs") == 0) {
                         s.fullscreen = true;
-                } else if (token == "keep-aspect") {
+                } else if (strcmp(token, "keep-aspect") == 0) {
                         s.keep_aspect = true;
-                } else if (token == "nocursor") {
+                } else if (strcmp(token, "nocursor") == 0) {
                         args.cursor = false;
-                } else if (token == "nodecorate") {
+                } else if (strcmp(token, "nodecorate") == 0) {
                         args.window_flags |= SDL_WINDOW_BORDERLESS;
-                } else if (token == "novsync") {
+                } else if (strcmp(token, "novsync") == 0) {
                         args.vsync = false;
-                } else if (token == "tearing") {
+                } else if (strcmp(token, "tearing") == 0) {
                         args.tearing_permitted = true;
-                } else if (token == "validation") {
+                } else if (strcmp(token, "validation") == 0) {
                         args.validation = true;
-                } else if (starts_with(token, "display=")) {
-                        constexpr auto pos = "display="sv.size();
-                        args.display_idx = svtoi(token.substr(pos));
-                } else if (starts_with(token, "driver=")) {
-                        constexpr auto pos = "driver="sv.size();
-                        args.driver = std::string{ token.substr(pos) };
-                } else if (starts_with(token, "gpu=")) {
-                        if (token == "integrated"sv) {
+                } else if (IS_KEY_PREFIX(token, "display")) {
+                        args.display_idx = cstoi(strchr(token, '=') + 1);
+                } else if (IS_KEY_PREFIX(token, "driver")) {
+                        args.driver = std::string{ strchr(token, '=') + 1};
+                } else if (IS_KEY_PREFIX(token, "gpu")) {
+                        char *val = strchr(token, '=') + 1;
+                        if (strcmp(val, "integrated") == 0) {
                                 args.gpu_idx = vulkan_display::gpu_integrated;
-                        } else if (token == "discrete"sv) {
+                        } else if (strcmp(val, "discrete") == 0) {
                                 args.gpu_idx = vulkan_display::gpu_discrete;
                         } else {
-                                constexpr auto pos = "gpu="sv.size();
-                                args.gpu_idx = svtoi(token.substr(pos));
+                                args.gpu_idx = cstoi(val);
                         }
-                } else if (starts_with(token, "pos=")) {
-                        auto tok = token;
-                        tok.remove_prefix("pos="sv.size());
-                        auto comma = tok.find(',');
-                        if (comma == npos) {
+                } else if (IS_KEY_PREFIX(token, "pos")) {
+                        if (strchr(token, ',') == nullptr) {
                                 LOG(LOG_LEVEL_ERROR) << MOD_NAME "Missing colon in option:" 
                                         << token << '\n';
                                 return false;
                         }
-                        args.x = svtoi(tok.substr(0, comma));
-                        args.y = svtoi(tok.substr(comma + 1));
-                } else if (starts_with(token, "size=")) {
-                        auto tok = token;
-                        tok.remove_prefix("size="sv.size());
-                        auto x = tok.find('x');
-                        if (x == npos) {
+                        token = strchr(token, '=') + 1;
+                        args.x = cstoi(token, strchr(token, ',') - token);
+                        token = strchr(token, ',') + 1;
+                        args.y = cstoi(token);
+                } else if (IS_KEY_PREFIX(token, "size")) {
+                        if (strchr(token, 'x') == nullptr) {
                                 LOG(LOG_LEVEL_ERROR) << MOD_NAME "Missing deliminer 'x' in option:" 
                                         << token << '\n';
                                 return false;
                         }
-                        s.width = svtoi(tok.substr(0, x));
-                        s.height = svtoi(tok.substr(x + 1));
-                } else if (starts_with(token, "window_flags=")) {
-                        constexpr auto pos = "window_flags="sv.size();
-                        int flags = svtoi(token.substr(pos));
-                        args.window_flags |= flags;
-                } else if (token == "help") {
-                        show_help();
-                        args.help = true;
+                        token = strchr(token, '=') + 1;
+                        s.width = cstoi(token, strchr(token, 'x') - token);
+                        token = strchr(token, 'x') + 1;
+                        s.height = cstoi(token);
+                } else if (IS_KEY_PREFIX(token, "window_flags")) {
+                        token = strchr(token, '=') + 1;
+                        args.window_flags |= cstoi(strchr(token, '=') + 1);
                 } else {
                         LOG(LOG_LEVEL_ERROR) << wrong_option_msg << token << '\n';
                         return false;
@@ -715,6 +710,64 @@ sdl_set_log_level()
                                  : SDL_LOG_PRIORITY_VERBOSE);
 }
 
+SDL_DisplayID
+get_display_id_from_idx(int idx)
+{
+        int            count    = 0;
+        SDL_DisplayID *displays = SDL_GetDisplays(&count);
+        if (idx < count) {
+                return displays[idx];
+        }
+        for (int i = 0; i < count; ++i) {
+                if (displays[i] == (unsigned) idx) {
+                        return idx;
+                }
+        }
+        MSG(ERROR, "Display index %d out of range or ID invalid!\n", idx);
+        return 0;
+}
+
+bool
+vulkan_sdl3_set_window_position(state_vulkan_sdl3            *s,
+                                const command_line_arguments *args)
+{
+        if (args->display_idx == -1 && args->x == SDL_WINDOWPOS_UNDEFINED &&
+            args->y == SDL_WINDOWPOS_UNDEFINED) {
+                return true; // nothing to set
+        }
+        int x = args->x;
+        int y = args->y;
+        if (args->display_idx != -1) {
+                if (x != SDL_WINDOWPOS_UNDEFINED || y != SDL_WINDOWPOS_UNDEFINED) {
+                        MSG(ERROR, "Do not set window positon and display at "
+                                   "the same time!\n");
+                        return false;
+                }
+                const SDL_DisplayID display_id =
+                    get_display_id_from_idx(args->display_idx);
+                if (display_id == 0) {
+                        return false;
+                }
+                x = SDL_WINDOWPOS_CENTERED_DISPLAY(display_id);
+                y = SDL_WINDOWPOS_CENTERED_DISPLAY(display_id);
+        }
+        if (SDL_SetWindowPosition(s->window, x, y)) {
+                return true;
+        }
+        const bool is_wayland =
+            strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0;
+        if (is_wayland && args->display_idx != -1 && !s->fullscreen) {
+                MSG(ERROR,
+                    "In Wayland, display specification is possible only with "
+                    "fullscreen flag ':fs' (%s)\n",
+                    SDL_GetError());
+        } else {
+                MSG(ERROR, "Error (SDL_SetWindowPosition): %s\n",
+                    SDL_GetError());
+        }
+        return false;
+}
+
 void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
         sdl_set_log_level();
         if (flags & DISPLAY_FLAG_AUDIO_ANY) {
@@ -726,7 +779,8 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
 
         command_line_arguments args{};
         if (fmt) {
-                if (!parse_command_line_arguments(args, *s, fmt)) {
+                std::string cpy = fmt;
+                if (!parse_command_line_arguments(args, *s, cpy.data())) {
                         return nullptr;
                 }
                 if (args.help) {
@@ -741,7 +795,7 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
         }
 
         if (!args.driver.empty()) {
-                SDL_SetHint(SDL_HINT_VIDEO_DRIVER, args.driver.c_str());
+                SDL_CHECK(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, args.driver.c_str()));
         }
         ret = SDL_InitSubSystem(SDL_INIT_VIDEO);
         if (!ret) {
@@ -751,9 +805,9 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
         MSG(NOTICE, "Using driver: %s\n", SDL_GetCurrentVideoDriver());
 
         if (!args.cursor) {
-                SDL_HideCursor();
+                SDL_CHECK(SDL_HideCursor());
         }
-        SDL_DisableScreenSaver();
+        SDL_CHECK(SDL_DisableScreenSaver());
 
         for (auto& binding : display_vulkan_keybindings) {
                 std::string msg = std::to_string(static_cast<int>(binding.first));
@@ -767,8 +821,6 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
                 window_title = get_commandline_param("window-title");
         }
 
-        int x = (args.x == SDL_WINDOWPOS_UNDEFINED ? SDL_WINDOWPOS_CENTERED_DISPLAY(args.display_idx) : args.x);
-        int y = (args.y == SDL_WINDOWPOS_UNDEFINED ? SDL_WINDOWPOS_CENTERED_DISPLAY(args.display_idx) : args.y);
         if(s->width == -1 && s->height == -1){
                 int display_index = 0;
                 const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(display_index);
@@ -779,16 +831,15 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
                 } else {
                         s->width = mode->w;
                         s->height = mode->h;
+                        log_msg(LOG_LEVEL_INFO, MOD_NAME "Detected display size: %dx%d\n", mode->w, mode->h);
                 }
-
-                log_msg(LOG_LEVEL_INFO, MOD_NAME "Detected display size: %dx%d\n", mode->w, mode->h);
         }
         if (s->width == 0) s->width = 960;
         if (s->height == 0) s->height = 540;
 
         int window_flags = args.window_flags | SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
         if (s->fullscreen) {
-                SDL_SetWindowFullscreen(s->window, true);
+                window_flags |= SDL_WINDOW_FULLSCREEN;
         }
 
         s->window = SDL_CreateWindow(window_title, s->width, s->height, window_flags);
@@ -797,7 +848,9 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
                 return nullptr;
         }
         s->window_callback = new WindowCallback(s->window);
-        SDL_SetWindowPosition(s->window, x, y);
+        if (!vulkan_sdl3_set_window_position(s.get(), &args)) {
+                return nullptr;
+        }
 
         uint32_t extension_count = 0;
         const char *const *extensions = SDL_Vulkan_GetInstanceExtensions(&extension_count);
@@ -832,7 +885,7 @@ void display_vulkan_done(void* state) {
         auto* s = static_cast<state_vulkan_sdl3*>(state);
         assert(s->magic == magic_vulkan_sdl3);
 
-        SDL_ShowCursor();
+        SDL_CHECK(SDL_ShowCursor());
 
         try {
                 s->vulkan->destroy();
@@ -959,7 +1012,7 @@ void display_vulkan_new_message(module* mod) {
 
         SDL_Event event{};
         event.type = s->sdl_user_new_message_event;
-        SDL_PushEvent(&event);
+        SDL_CHECK(SDL_PushEvent(&event));
 }
 
 

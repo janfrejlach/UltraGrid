@@ -93,7 +93,7 @@ static void display_frame(struct state_sdl3 *s, struct video_frame *frame);
 static struct video_frame *display_sdl3_getf(void *state);
 static void                display_sdl3_new_message(struct module *mod);
 static bool display_sdl3_reconfigure_real(void *state, struct video_desc desc);
-static void loadSplashscreen(struct state_sdl3 *s);
+static void display_sdl3_done(void *state);
 
 enum deint { DEINT_OFF, DEINT_ON, DEINT_FORCE };
 
@@ -466,18 +466,24 @@ sdl3_print_displays()
                 if (dname == NULL) {
                         dname = SDL_GetError();
                 }
-                color_printf(TBOLD("%d") " - %s", i, dname);
+                color_printf(TBOLD("%d") " - %s (ID: %d)", i, dname, displays[i]);
         }
 }
 
-static SDL_DisplayID get_display_id_to_idx(int idx)
+static SDL_DisplayID
+get_display_id_from_idx(int idx)
 {
         int            count    = 0;
         SDL_DisplayID *displays = SDL_GetDisplays(&count);
         if (idx < count) {
                 return displays[idx];
         }
-        MSG(ERROR, "Display index %d out of range!\n", idx);
+        for (int i = 0; i < count; ++i) {
+                if (displays[i] == (unsigned) idx) {
+                        return idx;
+                }
+        }
+        MSG(ERROR, "Display index %d out of range or ID invalid!\n", idx);
         return 0;
 }
 
@@ -490,7 +496,7 @@ show_help(const char *driver, bool full)
         SDL_CHECK(SDL_InitSubSystem(SDL_INIT_VIDEO));
         printf("SDL options:\n");
         color_printf(TBOLD(TRED(
-            "\t-d sdl") "[[:fs|:d|:display=<didx>|:driver=<drv>|:novsync|:"
+            "\t-d sdl") "[[:fs|:d|:display=<d>|:driver=<drv>|:novsync|:"
                         "renderer=<name[s]>|:nodecorate|:size[=WxH]|:window_"
                         "flags=<f>|:keep-aspect]*]") "\n");
         color_printf(TBOLD(
@@ -500,7 +506,7 @@ show_help(const char *driver, bool full)
             "\td[force]") " - deinterlace (force even for progressive video)\n");
         color_printf(TBOLD("\t      fs") " - fullscreen\n");
         color_printf(
-            TBOLD("\t  <didx>") " - display index, available indices: ");
+            TBOLD("\t     <d>") " - display index or ID, available indices: ");
         sdl3_print_displays();
         color_printf("%s\n", (driver == NULL ? TBOLD(" *")  : ""));
         color_printf(TBOLD("\t   <drv>") " - one of following: ");
@@ -737,6 +743,8 @@ recreate_textures(struct state_sdl3 *s, struct video_desc desc)
                 struct video_frame_sdl3_data *frame_data =
                     calloc(1, sizeof *frame_data);
                 frame_data->texture = texture;
+                f->callbacks.dispose_udata = frame_data;
+                f->callbacks.data_deleter = vf_sdl_texture_data_deleter;
                 if (s->cs_data->convert != NULL) {
                         frame_data->preconv_data = f->tiles[0].data =
                             malloc(f->tiles[0].data_len);
@@ -744,14 +752,13 @@ recreate_textures(struct state_sdl3 *s, struct video_desc desc)
                         SDL_CHECK(SDL_LockTexture(texture, NULL,
                                                   (void **) &f->tiles[0].data,
                                                   &s->texture_pitch),
+                                  vf_free(f);
                                   return false);
                         if (!codec_is_planar(desc.color_spec)) {
                                 f->tiles[0].data_len =
                                     desc.height * s->texture_pitch;
                         }
                 }
-                f->callbacks.dispose_udata = frame_data;
-                f->callbacks.data_deleter = vf_sdl_texture_data_deleter;
                 simple_linked_list_append(s->free_frame_queue, f);
         }
 
@@ -769,6 +776,45 @@ vulkan_warn(const char *req_renderers_name, const char *actual_renderer_name)
                 "Selected renderer vulkan is known for having "
                 "issues!%s\n",
                 explicit ? "" : " Please report!");
+}
+
+static bool
+sdl3_set_window_position(struct state_sdl3 *s) {
+        if (s->display_idx == -1 && s->x == SDL_WINDOWPOS_UNDEFINED &&
+            s->y == SDL_WINDOWPOS_UNDEFINED) {
+                return true; // nothing to set
+        }
+        int x = s->x;
+        int y = s->y;
+        if (s->display_idx != -1) {
+                if (x != SDL_WINDOWPOS_UNDEFINED || y != SDL_WINDOWPOS_UNDEFINED) {
+                        MSG(ERROR, "Do not set windows positiona and display "
+                                   "at the same time!\n");
+                        return false;
+                }
+                const SDL_DisplayID display_id =
+                    get_display_id_from_idx(s->display_idx);
+                if (display_id == 0) {
+                        return false;
+                }
+                x = (int) SDL_WINDOWPOS_CENTERED_DISPLAY(display_id);
+                y = (int) SDL_WINDOWPOS_CENTERED_DISPLAY(display_id);
+        }
+        if (SDL_SetWindowPosition(s->window, x, y)) {
+                return true;
+        }
+        const bool is_wayland =
+            strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0;
+        if (is_wayland && s->display_idx != -1 && !s->fs) {
+                MSG(ERROR,
+                    "In Wayland, display specification is possible only with "
+                    "fullscreen flag ':fs' (%s)\n",
+                    SDL_GetError());
+        } else {
+                MSG(ERROR, "Error (SDL_SetWindowPosition): %s\n",
+                    SDL_GetError());
+        }
+        return false;
 }
 
 static bool
@@ -796,19 +842,15 @@ display_sdl3_reconfigure_real(void *state, struct video_desc desc)
         }
         int width  = s->fixed_w ? s->fixed_w : desc.width;
         int height = s->fixed_h ? s->fixed_h : desc.height;
-        const SDL_DisplayID display_id = get_display_id_to_idx(s->display_idx);
-        int x      = s->x == SDL_WINDOWPOS_UNDEFINED
-                         ? (int) SDL_WINDOWPOS_CENTERED_DISPLAY(display_id)
-                         : s->x;
-        int y      = s->y == SDL_WINDOWPOS_UNDEFINED
-                         ? (int) SDL_WINDOWPOS_CENTERED_DISPLAY(display_id)
-                         : s->y;
         s->window  = SDL_CreateWindow(window_title, width, height, flags);
         if (!s->window) {
                 MSG(ERROR, "Unable to create window: %s\n", SDL_GetError());
                 return false;
         }
-        SDL_SetWindowPosition(s->window, x, y);
+        ;
+        if (!sdl3_set_window_position(s)) {
+                return false;
+        }
 
         if (s->renderer) {
                 SDL_DestroyRenderer(s->renderer);
@@ -862,14 +904,14 @@ skip_window_creation:
         return true;
 }
 
-static void
+static bool
 loadSplashscreen(struct state_sdl3 *s)
 {
         struct video_frame *frame = get_splashscreen();
         if (!display_sdl3_reconfigure_real(s, video_desc_from_frame(frame))) {
                 MSG(WARNING, "Cannot render splashscreeen!\n");
                 vf_free(frame);
-                return;
+                return false;
         }
         struct video_frame *splash = display_sdl3_getf(s);
         memcpy(splash->tiles[0].data, frame->tiles[0].data,
@@ -878,6 +920,7 @@ loadSplashscreen(struct state_sdl3 *s)
         display_frame(s, splash); // don't be tempted to use _putf() - it will
                                   // use event queue and there may arise a
                                   // race-condition with recv thread
+        return true;
 }
 
 static bool
@@ -944,6 +987,7 @@ display_sdl3_init(struct module *parent, const char *fmt, unsigned int flags)
         struct state_sdl3 *s      = calloc(1, sizeof *s);
 
         s->magic  = MAGIC_SDL3;
+        s->display_idx = -1;
         s->x = s->y = SDL_WINDOWPOS_UNDEFINED;
         s->vsync    = true;
 
@@ -1081,7 +1125,10 @@ display_sdl3_init(struct module *parent, const char *fmt, unsigned int flags)
                                         keybindings[i].description);
         }
 
-        loadSplashscreen(s);
+        if (!loadSplashscreen(s)) {
+                display_sdl3_done(s);
+                return NULL;
+        }
 
         log_msg(LOG_LEVEL_NOTICE, "SDL3 initialized successfully.\n");
 

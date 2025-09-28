@@ -16,8 +16,13 @@ jobs:
       coverity_token: ${{ secrets.coverity_token }}
 
     steps:
+    - name: Check Coverity token presence
+      if: env.coverity_token == ''
+      run: |
+              echo "secrects.coverity_token not present, skipping the analysis!"
+              exit 1
+
     - name: Get Coverity tool name # the file name contains version and is used as the cache key
-      if: ${{ env.coverity_token }}
       id: tool
       run: |
         FILENAME=$(curl -LIf "https://scan.coverity.com/download/linux64\
@@ -25,7 +30,6 @@ jobs:
         sed -n '/content-disposition/s/.*\"\(.*\)\"/\1/p')
         echo "filename=$FILENAME" >> $GITHUB_OUTPUT
     - name: Run actions/cache for Coverity build tool
-      if: ${{ env.coverity_token }}
       id: cache-coverity-tool
       uses: actions/cache@main
       with:
@@ -36,48 +40,54 @@ jobs:
       run: |
         wget --no-verbose https://scan.coverity.com/download/linux64 --post-data "token=$coverity_token&project=UltraGrid" -O ~/coverity_tool.tgz
     - name: Extract Coverity build tool
-      if: ${{ env.coverity_token }}
       run: |
         tar xaf ~/coverity_tool.tgz
         mv cov-analysis* /tmp/cov-analysis
 
     - uses: actions/checkout@v4
-      if: ${{ env.coverity_token }}
 
     - name: Fetch SDKs ETags
-      if: ${{ env.coverity_token }}
       id: etags
       run: |
         $GITHUB_WORKSPACE/.github/scripts/get-etag.sh ndi\
-         https://downloads.ndi.tv/SDK/NDI_SDK_Linux/Install_NDI_SDK_v6_Linux.\
-        tar.gz >> $GITHUB_OUTPUT
+         https://downloads.ndi.tv/SDK/NDI_SDK_Linux/\
+        Install_NDI_SDK_v6_Linux.tar.gz >> $GITHUB_OUTPUT
     - name: Run actions/cache for NDI
-      if: ${{ env.coverity_token }}
       id: cache-ndi
       uses: actions/cache@main
       with:
         path: /var/tmp/Install_NDI_SDK_Linux.tar.gz
         key: cache-ndi-${{ runner.os }}-${{ steps.etags.outputs.ndi }}
     - name: Download NDI
-      if: ${{ env.coverity_token }} && steps.cache-ndi.outputs.cache-hit != 'true'
+      if: steps.cache-ndi.outputs.cache-hit != 'true'
       run: "curl -Lf https://downloads.ndi.tv/SDK/NDI_SDK_Linux/\
        Install_NDI_SDK_v6_Linux.tar.gz -o /var/tmp/Install_NDI_SDK_Linux.tar.gz"
-
+    - name: Cache FFmpeg
+      uses: actions/cache@main
+      with:
+        path: '/var/tmp/ffmpeg'
+        key: cache-${{ github.workflow }}-ffmpeg-${{ runner.os }}-${{ hashFiles( '.github/scripts/Linux/install_ffmpeg.sh', '.github/scripts/Linux/install_other.sh', '.github/scripts/Linux/ffmpeg-patches/*') }}
+    - name: Cache SDL
+      uses: actions/cache@main
+      with:
+        path: '/var/tmp/sdl'
+        key: cache-${{ github.workflow }}-sdl-${{ runner.os }}-${{ hashFiles( '.github/scripts/Linux/install_sdl.sh' ) }}
+    - name: Cache GLFW
+      uses: actions/cache@main
+      with:
+        path: '/var/tmp/glfw'
+        key: cache-${{ github.workflow }}-glfw-${{ runner.os }}-${{ hashFiles( '.github/scripts/Linux/install_glfw.sh' ) }}
     - name: bootstrap
       run: |
            . .github/scripts/environment.sh
            .github/scripts/Linux/prepare.sh
-           sudo apt install libavcodec-dev libavformat-dev libswscale-dev libfluidsynth-dev libsdl2-ttf-dev
 
     - name: configure
-      if: ${{ env.coverity_token }}
       run: ./autogen.sh $FEATURES
     - name: Build with cov-build
-      if: ${{ env.coverity_token }}
       run: |
         /tmp/cov-analysis/bin/cov-build --dir cov-int make -j2
     - name: Submit the result to Coverity Scan
-      if: ${{ env.coverity_token }}
       run: |
         tar caf ultragrid.tar.xz cov-int
         result=$(curl -Sf --form token=$coverity_token \

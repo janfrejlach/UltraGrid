@@ -4,7 +4,7 @@
  * @author Martin Bela      <492789@mail.muni.cz>
  */
 /*
- * Copyright (c) 2018-2023 CESNET, z. s. p. o.
+ * Copyright (c) 2018-2025 CESNET, zájmové sdružení právnických osob
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -56,18 +56,20 @@
 #include <cstdio>
 extern "C" {
 #else
+#include <stdbool.h>
 #include <stdio.h>
 #endif
 
-/**
- * @param path buffer with size MAX_PATH_SIZE where function stores path to executable
- * @return 1 - SUCCESS, 0 - ERROR
- */
-int get_exec_path(char* path);
+enum check_file_type {
+        FT_ANY,
+        FT_REGULAR,
+        FT_DIRECTORY,
+};
+bool file_exists(const char *path, enum check_file_type type);
 const char *get_temp_dir(void);
 FILE *get_temp_file(const char **filename);
-const char *get_install_root(void);
- char *strdup_path_with_expansion(const char *orig_path);
+const char *get_ug_data_path(void);
+char *strdup_path_with_expansion(const char *orig_path);
 
 #ifdef __cplusplus
 } // extern "C"

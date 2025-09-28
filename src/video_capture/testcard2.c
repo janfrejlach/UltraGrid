@@ -6,7 +6,7 @@
  * Merge to mainline testcard.
  */
 /*
- * Copyright (c) 2011-2024 CESNET
+ * Copyright (c) 2011-2025 CESNET, zájmové sdružení právnických osob
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -45,7 +45,7 @@
 #include <assert.h>                     // for assert
 #include <ctype.h>                      // for isdigit
 #include <errno.h>                      // for errno
-#include <limits.h>                     // for SHRT_MAX
+#include <limits.h>                     // for SHRT_MAX, UCHAR_MAX
 #include <math.h>                       // for sin, M_PI
 #include <pthread.h>                    // for pthread_mutex_lock, pthread_m...
 #include <stdbool.h>                    // for false, true, bool
@@ -76,6 +76,7 @@
 #include "utils/color_out.h"            // for color_printf, TBOLD, TRED
 #include "utils/fs.h"                   // for MAX_PATH_SIZE
 #include "utils/macros.h"               // for IS_KEY_PREFIX, MIN, IF_NOT_NU...
+#include "utils/random.h"               // for ug_rand
 #include "utils/text.h"                 // for get_font_candidates
 #include "utils/thread.h"               // for set_thread_name
 #include "video.h"                      // for get_video_desc_from_string
@@ -84,16 +85,20 @@
 #include "video_codec.h"                // for vc_get_linesize, vc_get_datalen
 #include "video_frame.h"                // for parse_fps, vf_alloc_desc, vf_...
 
-#define AUDIO_BUFFER_SIZE (AUDIO_SAMPLE_RATE * AUDIO_BPS * \
-                s->audio.ch_count * BUFFER_SEC)
-#define AUDIO_BPS 2
-#define AUDIO_SAMPLE_RATE 48000
-#define BANNER_HEIGHT 150L
-#define BANNER_MARGIN_BOTTOM 75L
-#define BUFFER_SEC 1
-#define DEFAULT_FORMAT "1920:1080:24:UYVY"
 #define EPS_PLUS_1 1.0001
-#define FONT_HEIGHT 108
+enum {
+        AUDIO_BPS            = 2,
+        AUDIO_FREQUENCY      = 200,
+        AUDIO_SAMPLE_RATE    = 48000,
+        BANNER_HEIGHT        = 150,
+        BANNER_MARGIN_BOTTOM = 75,
+        BUFFER_SEC           = 1,
+        FONT_HEIGHT          = 108,
+        NOISE_DEFAULT        = 200,
+};
+
+#define DEFAULT_FORMAT \
+        (struct video_desc){ 1920, 1080, UYVY, 24, PROGRESSIVE, 1 }
 #define MOD_NAME "[testcard2] "
 
 #ifdef HAVE_SDL3
@@ -109,6 +114,7 @@ struct testcard_state2 {
 
         int count;
         unsigned char *bg; ///< bars converted to dest color_spec
+        unsigned noise; ///< add noise if >0; the magnitude is distance
         struct timeval t0;
         struct video_desc desc;
         char *data;
@@ -122,7 +128,7 @@ struct testcard_state2 {
                 seconds_tone_played;
         struct timeval last_audio_time;
         char *audio_tone, *audio_silence;
-        unsigned int grab_audio:1;
+        bool grab_audio;
         sem_t semaphore;
         
         pthread_t thread_id;
@@ -130,27 +136,32 @@ struct testcard_state2 {
         volatile bool should_exit;
 };
 
-static int configure_audio(struct testcard_state2 *s)
+static void
+configure_audio(struct testcard_state2 *s)
 {
         s->audio.bps = AUDIO_BPS;
         s->audio.ch_count = audio_capture_channels > 0 ? audio_capture_channels : DEFAULT_AUDIO_CAPTURE_CHANNELS;
         s->audio.sample_rate = AUDIO_SAMPLE_RATE;
-        
-        s->audio_silence = calloc(1, AUDIO_BUFFER_SIZE /* 1 sec */);
-        
-        s->audio_tone = calloc(1, AUDIO_BUFFER_SIZE /* 1 sec */);
+
+        const size_t audio_buffer_size = (size_t) AUDIO_SAMPLE_RATE *
+                                         AUDIO_BPS * s->audio.ch_count *
+                                         BUFFER_SEC;
+        s->audio_silence = calloc(1, audio_buffer_size);
+        s->audio_tone = calloc(1, audio_buffer_size);
         short int * data = (short int *)(void *) s->audio_tone;
-        for(int i=0; i < (int) AUDIO_BUFFER_SIZE/2; i+=2 )
-        {
-                data[i] = data[i+1] = (float) sin( ((double)i/(double)200) * M_PI * 2. ) * SHRT_MAX;
+        for (size_t i = 0; i < audio_buffer_size / 2; i += 2) {
+                data[i] = data[i + 1] =
+                    (float) sin(((double) i / (double) AUDIO_FREQUENCY) * M_PI *
+                                2.) *
+                    SHRT_MAX;
         }
 
         printf("[testcard2] playing audio\n");
-        
-        return 0;
 }
 
-static bool parse_fmt(struct testcard_state2 *s, char *fmt) {
+static bool
+parse_fmt_positional(struct testcard_state2 *s, char *fmt)
+{
         char *save_ptr = 0;
         char *tmp      = strtok_r(fmt, ":", &save_ptr);
         if (!tmp) {
@@ -193,85 +204,103 @@ static bool parse_fmt(struct testcard_state2 *s, char *fmt) {
         return true;
 }
 
+static bool
+parse_fmt(struct testcard_state2 *s, char *fmt)
+{
+        bool  ret      = true;
+        char *save_ptr = NULL;
+        char *tmp      = strtok_r(fmt, ":", &save_ptr);
+        while (tmp) {
+                if (IS_KEY_PREFIX(tmp, "codec")) {
+                        s->desc.color_spec =
+                            get_codec_from_name(strchr(tmp, '=') + 1);
+                        if (s->desc.color_spec == VIDEO_CODEC_NONE) {
+                                log_msg(LOG_LEVEL_ERROR,
+                                        MOD_NAME "Wrong color spec: %s\n",
+                                        strchr(tmp, '=') + 1);
+                                return ret;
+                        }
+                } else if (IS_KEY_PREFIX(tmp, "mode")) {
+                        codec_t saved_codec = s->desc.color_spec;
+                        s->desc =
+                            get_video_desc_from_string(strchr(tmp, '=') + 1);
+                        s->desc.color_spec = saved_codec;
+                } else if (IS_KEY_PREFIX(tmp, "size")) {
+                        tmp = strchr(tmp, '=') + 1;
+                        if (isdigit(tmp[0]) && strchr(tmp, 'x') != NULL) {
+                                s->desc.width  = atoi(tmp);
+                                s->desc.height = atoi(strchr(tmp, 'x') + 1);
+                        } else {
+                                struct video_desc size_dsc =
+                                    get_video_desc_from_string(tmp);
+                                s->desc.width  = size_dsc.width;
+                                s->desc.height = size_dsc.height;
+                        }
+                } else if (IS_KEY_PREFIX(tmp, "fps")) {
+                        if (!parse_fps(strchr(tmp, '=') + 1, &s->desc)) {
+                                return false;
+                        }
+                } else if (IS_PREFIX(tmp, "noise") ||
+                           IS_KEY_PREFIX(tmp, "noise")) {
+                        s->noise = IS_KEY_PREFIX(tmp, "noise")
+                                       ? atoi(strchr(tmp, '=') + 1)
+                                       : NOISE_DEFAULT;
+                } else {
+                        MSG(ERROR, "Unknown option: %s\n", tmp);
+                        return false;
+                }
+                tmp = strtok_r(NULL, ":", &save_ptr);
+        }
+        return true;
+}
+
+static void
+usage()
+{
+        color_printf("testcard2 is an alternative implementation of testing "
+                     "signal source.\n");
+        color_printf("It is less maintained than mainline testcard and has "
+                     "less features but has some extra ones, i. a. a timer (if "
+                     "SDL(2)_ttf is found.\n");
+        color_printf("\n");
+        color_printf("testcard2 usage:\n");
+        color_printf(TBOLD(
+            TRED("\t-t testcard2") "[:<width>:<height>:<fps>:<codec>]") "\n");
+        color_printf("or\n");
+        color_printf(
+            TBOLD(TRED("\t-t testcard2") "[:size=<width>x<height>][:fps=<fps>]["
+                                         ":codec=<codec>][:mode=<mode>]") "\n");
+        printf("\nOptions:\n");
+        color_printf("\t" TBOLD("noise[=<val>]") " - add noise to the image\n");
+        printf("\n");
+        testcard_show_codec_help("testcard2", true);
+}
+
 static int vidcap_testcard2_init(struct vidcap_params *params, void **state)
 {
         if (vidcap_params_get_fmt(params) == NULL || strcmp(vidcap_params_get_fmt(params), "help") == 0) {
-                color_printf("testcard2 is an alternative implementation of testing signal source.\n");
-                color_printf("It is less maintained than mainline testcard and has less features but has some extra ones, i. a. a timer (if SDL(2)_ttf is found.\n");
-                color_printf("\n");
-                color_printf("testcard2 options:\n");
-                color_printf(TBOLD(TRED("\t-t testcard2") "[:<width>:<height>:<fps>:<codec>]") "\n");
-                color_printf("or\n");
-                color_printf(TBOLD(TRED("\t-t testcard2") "[:size=<width>x<height>][:fps=<fps>][:codec=<codec>][:mode=<mode>]") "\n");
-                testcard_show_codec_help("testcard2", true);
-
+                usage();
                 return VIDCAP_INIT_NOERR;
         }
 
         struct testcard_state2 *s = calloc(1, sizeof(struct testcard_state2));
-        if (!s)
+        if (!s) {
                 return VIDCAP_INIT_FAIL;
-        s->desc.tile_count = 1;
-        s->desc.interlacing = PROGRESSIVE;
+        }
+        s->desc = DEFAULT_FORMAT;
 
-        char *fmt = strdup(strlen(vidcap_params_get_fmt(params)) != 0 ? vidcap_params_get_fmt(params) : DEFAULT_FORMAT);
-        char *ptr = fmt;
+        char *fmt = strdup(vidcap_params_get_fmt(params));
+        bool ret = true;
 
-        if (strlen(ptr) > 0 && isdigit(ptr[0])) {
-                bool ret = parse_fmt(s, fmt);
-                free(fmt);
-                if (!ret) {
-                        free(s);
-                        return VIDCAP_INIT_FAIL;
-                }
+        if (strlen(fmt) > 0 && isdigit(fmt[0])) {
+                ret = parse_fmt_positional(s, fmt);
         } else {
-                char *default_fmt = strdup(DEFAULT_FORMAT);
-                parse_fmt(s, default_fmt);
-                free(default_fmt);
-
-                bool ret = true;
-                char *save_ptr = NULL;
-                char *tmp = strtok_r(ptr, ":", &save_ptr);
-                while (tmp) {
-                        if (IS_KEY_PREFIX(tmp, "codec")) {
-                                s->desc.color_spec = get_codec_from_name(strchr(tmp, '=') + 1);
-                                if (s->desc.color_spec == VIDEO_CODEC_NONE) {
-                                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "Wrong color spec: %s\n", strchr(tmp, '=') + 1);
-                                        ret = false;
-                                        break;
-                                }
-                        } else if (IS_KEY_PREFIX(tmp, "mode")) {
-                                codec_t saved_codec = s->desc.color_spec;
-                                s->desc = get_video_desc_from_string(strchr(tmp, '=') + 1);
-                                s->desc.color_spec = saved_codec;
-                        } else if (IS_KEY_PREFIX(tmp, "size")) {
-                                tmp = strchr(tmp, '=') + 1;
-                                if (isdigit(tmp[0]) && strchr(tmp, 'x') != NULL) {
-                                        s->desc.width = atoi(tmp);
-                                        s->desc.height = atoi(strchr(tmp, 'x') + 1);
-                                } else {
-                                        struct video_desc size_dsc =
-                                                get_video_desc_from_string(tmp);
-                                        s->desc.width = size_dsc.width;
-                                        s->desc.height = size_dsc.height;
-                                }
-                        } else if (IS_KEY_PREFIX(tmp, "fps")) {
-                                if (!parse_fps(strchr(tmp, '=') + 1, &s->desc)) {
-                                        ret = false;
-                                        break;
-                                }
-                        } else {
-                                fprintf(stderr, "[testcard2] Unknown option: %s\n", tmp);
-                                ret = false;
-                                break;
-                        }
-                        tmp = strtok_r(NULL, ":", &save_ptr);
-                }
-                free(fmt);
-                if (!ret) {
-                        free(s);
-                        return VIDCAP_INIT_FAIL;
-                }
+                ret = parse_fmt(s, fmt);
+        }
+        free(fmt);
+        if (!ret) {
+                free(s);
+                return VIDCAP_INIT_FAIL;
         }
 
         if (s->desc.width <= 0 || s->desc.height <= 0) {
@@ -304,15 +333,10 @@ static int vidcap_testcard2_init(struct vidcap_params *params, void **state)
                 free(surface.data);
         }
 
-        if(vidcap_params_get_flags(params) & VIDCAP_FLAG_AUDIO_EMBEDDED) {
-                s->grab_audio = 1;
-                if(configure_audio(s) != 0) {
-                        s->grab_audio = 0;
-                        fprintf(stderr, "[testcard2] Disabling audio output. "
-                                        "\n");
-                }
-        } else {
-                s->grab_audio = 0;
+        s->grab_audio =
+            vidcap_params_get_flags(params) & VIDCAP_FLAG_AUDIO_EMBEDDED;
+        if (s->grab_audio) {
+                configure_audio(s);
         }
 
         s->count = 0;
@@ -323,22 +347,6 @@ static int vidcap_testcard2_init(struct vidcap_params *params, void **state)
         platform_sem_init(&s->semaphore, 0, 0);
         printf("Testcard capture set to %dx%d\n", s->desc.width, s->desc.height);
 
-        if(vidcap_params_get_flags(params) & VIDCAP_FLAG_AUDIO_EMBEDDED) {
-                s->grab_audio = 1;
-                if(configure_audio(s) != 0) {
-                        s->grab_audio = 0;
-                        fprintf(stderr, "[testcard] Disabling audio output. "
-                                        "SDL-mixer missing, running on Mac or other problem.");
-                }
-        } else {
-                s->grab_audio = 0;
-        }
-        
-        if(!s->grab_audio) {
-                s->audio_tone = NULL;
-                s->audio_silence = NULL;
-        }
-        
         gettimeofday(&s->start_time, NULL);
         
         pthread_mutex_init(&s->lock, NULL);
@@ -370,6 +378,22 @@ static void vidcap_testcard2_done(void *state)
         free(s->bg);
         free(s->data);
         free(s);
+}
+
+static void
+add_noise(unsigned char *data, size_t len, unsigned bpp, unsigned noisiness)
+{
+        if (noisiness == 0) {
+                return;
+        }
+        unsigned char *end = data + len;
+        data += bpp * (ug_rand() % noisiness);
+        while (data < end) {
+                for (unsigned i = 0; i < bpp; ++i) {
+                        data[i] = ug_rand() % (UCHAR_MAX + 1);
+                }
+                data += bpp * (1 + (ug_rand() % noisiness));
+        }
 }
 
 /**
@@ -478,6 +502,8 @@ void * vidcap_testcard2_thread(void *arg)
                         ptr += vc_get_linesize(s->desc.width, s->desc.color_spec);
                 }
 
+                add_noise(tmp, data_len, get_bpp(s->desc.color_spec), s->noise);
+
 #ifdef HAVE_LIBSDL_TTF
                 memset(banner, 0xFF, 4L * s->desc.width * BANNER_HEIGHT);
 
@@ -512,7 +538,7 @@ void * vidcap_testcard2_thread(void *arg)
 #else
                 SDL_FreeSurface(text);
 #endif // HAVE_SDL3
-#endif
+#endif // defined HAVE_LIBSDL_TTF
 
 next_frame:
                 next_frame_time = s->start_time;
