@@ -3,7 +3,7 @@
  * @author Martin Bela      <492789@mail.muni.cz>
  */
 /*
- * Copyright (c) 2021-2023 CESNET, z. s. p. o.
+ * Copyright (c) 2021-2025 CESNET, zajmové sdružení právnických osob
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,8 +48,9 @@ enum class Format{
         UYVY8_422,
         UYVY8_422_conv,
         YUYV8_422,
+        VUYA8_4444_conv,
         YUYV16_422,
-        UYVA16_422_conv,
+        UYVA16_4444_conv,
         RGB10A2_conv,
         RGB16
 };
@@ -61,33 +62,30 @@ struct ImageDescription;
 namespace vulkan_display_detail {
 
 struct FormatInfo{
-        vulkan_display::Format format;
         vk::Format buffer_format;
-        std::string conversion_shader = "";
+        const char *conversion_shader = "";
         vk::Format conversion_image_format{};
 };
 
-inline const FormatInfo& format_info(vulkan_display::Format format){
+inline FormatInfo format_info(vulkan_display::Format format){
 
         using F = vulkan_display::Format;
         using VkF = vk::Format;
 
-        static std::array<FormatInfo, 11> format_infos = {{
-{F::uninitialized,   VkF::eUndefined,            },
-{F::RGBA8,           VkF::eR8G8B8A8Unorm,        },
-{F::RGB8,            VkF::eR8G8B8Srgb,           },
-{F::UYVY8_422,       VkF::eB8G8R8G8422Unorm,     },
-{F::UYVY8_422_conv,  VkF::eR8G8B8A8Unorm,        {"UYVY8_conv"}, VkF::eR8G8B8A8Unorm},
-{F::YUYV8_422,       VkF::eG8B8G8R8422Unorm,     },
-{F::YUYV16_422,      VkF::eG16B16G16R16422Unorm, },
-{F::UYVA16_422_conv, VkF::eR16G16B16A16Uint,     {"UYVA16_conv"}, VkF::eR16G16B16A16Sfloat},
-{F::RGB10A2_conv,    VkF::eR8G8B8A8Uint,         {"RGB10A2_conv"}, VkF::eA2B10G10R10UnormPack32},
-{F::RGB16,          VkF::eR16G16B16Unorm        },
-        }};
-
-        auto& result = format_infos[static_cast<size_t>(format)];
-        assert(result.format == format);
-        return result;
+        switch (format) {
+        case F::uninitialized:    return { VkF::eUndefined,            };
+        case F::RGBA8:            return { VkF::eR8G8B8A8Unorm,        };
+        case F::RGB8:             return { VkF::eR8G8B8Srgb,           };
+        case F::UYVY8_422:        return { VkF::eB8G8R8G8422Unorm,     };
+        case F::UYVY8_422_conv:   return { VkF::eR8G8B8A8Unorm,        "UYVY8_conv", VkF::eR8G8B8A8Unorm };
+        case F::YUYV8_422:        return { VkF::eG8B8G8R8422Unorm,     };
+        case F::VUYA8_4444_conv:  return { VkF::eR8G8B8A8Unorm,        "VUYA8_conv", VkF::eR8G8B8A8Unorm };
+        case F::YUYV16_422:       return { VkF::eG16B16G16R16422Unorm, };
+        case F::UYVA16_4444_conv: return { VkF::eR16G16B16A16Uint,     "UYVA16_conv", VkF::eR16G16B16A16Sfloat };
+        case F::RGB10A2_conv:     return { VkF::eR8G8B8A8Uint,         "RGB10A2_conv", VkF::eA2B10G10R10UnormPack32 };
+        case F::RGB16:            return { VkF::eR16G16B16Unorm        };
+        };
+        abort();
 }
 
 vk::Extent2D get_buffer_size(const vulkan_display::ImageDescription& description);
@@ -116,7 +114,7 @@ struct ImageDescription {
                 return !(*this == other);
         }
 
-        const detail::FormatInfo& format_info() const { return detail::format_info(format); }
+        detail::FormatInfo format_info() const { return detail::format_info(format); }
 };
 
 class TransferImage;

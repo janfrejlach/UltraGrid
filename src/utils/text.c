@@ -3,7 +3,7 @@
  * @author Martin Pulec     <pulec@cesnet.cz>
  */
 /*
- * Copyright (c) 2014-2023 CESNET, z. s. p. o.
+ * Copyright (c) 2014-2025 CESNET, zájmové sdružení právnických osob
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -238,6 +238,10 @@ wrap_paragraph(char *text)
         return text;
 }
 
+
+static unsigned char font_data[(FONT_W * FONT_COUNT + 7) / 8 * FONT_H];
+static bool          font_data_initialized = false;
+
 // since the data are already in memory, it would be also possible to use
 // pointer directly to font array (skipping or deleting PBM header)
 static bool draw_line_init(unsigned char *out) {
@@ -263,59 +267,115 @@ static bool draw_line_init(unsigned char *out) {
 
         memcpy(out, font_data, (info.width + 7) / 8 * info.height);
         free(font_data);
+        font_data_initialized = true;
         return true;
+}
+
+/// draw the letter as RGBA pixmap
+static void
+draw_letter(char c, uint32_t fg, uint32_t bg, unsigned char *buf,
+            const unsigned char *font_data, int pitch)
+{
+        if (c < ' ' || c > '~') {
+                c = '?';
+        }
+        c -= ' ';
+        const unsigned char fg0 = fg & 0xFFU;
+        const unsigned char fg1 = (fg >> 8U) & 0xFFU;
+        const unsigned char fg2 = (fg >> 16U) & 0xFFU;
+        const unsigned char fg3 = (fg >> 24U) & 0xFFU;
+        const unsigned char bg0 = bg & 0xFFU;
+        const unsigned char bg1 = (bg >> 8U) & 0xFFU;
+        const unsigned char bg2 = (bg >> 16U) & 0xFFU;
+        const unsigned char bg3 = (bg >> 24U) & 0xFFU;
+        for (int j = 0; j < FONT_H; ++j) {
+                for (int i = 0; i < FONT_W; ++i) {
+                        int pos_x  = (FONT_W * c + i) / 8;
+                        int mask   = 1 << (FONT_W - ((FONT_W * c + i) % 8));
+                        int offset = (FONT_W * FONT_COUNT + 7) / 8 * j;
+                        if (font_data[offset + pos_x] & mask) {
+                                // clang-format off
+                                buf[(j * pitch) + (4 * i)]     = fg0;
+                                buf[(j * pitch) + (4 * i) + 1] = fg1;
+                                buf[(j * pitch) + (4 * i) + 2] = fg2;
+                                buf[(j * pitch) + (4 * i) + 3] = fg3;
+                                // clang-format on
+                        } else if (bg != 0) {
+                                buf[(j * pitch) + (4 * i)]     = bg0;
+                                buf[(j * pitch) + (4 * i) + 1] = bg1;
+                                buf[(j * pitch) + (4 * i) + 2] = bg2;
+                                buf[(j * pitch) + (4 * i) + 3] = bg3;
+                        }
+                }
+                if (bg) { // fill space between characters
+                        buf[(j * pitch) + (4 * (FONT_W_SPACE - 1))]     = bg0;
+                        buf[(j * pitch) + (4 * (FONT_W_SPACE - 1)) + 1] = bg1;
+                        buf[(j * pitch) + (4 * (FONT_W_SPACE - 1)) + 2] = bg2;
+                        buf[(j * pitch) + (4 * (FONT_W_SPACE - 1)) + 3] = bg3;
+                }
+        }
 }
 
 /**
  * draws a line with built-in bitmap 12x7 bitmap font separated by 1 px space, RGBA
  */
 bool draw_line(char *buf, int pitch, const char *text, uint32_t color, bool solid) {
-        static unsigned char font_data[(FONT_W * FONT_COUNT + 7) / 8 * FONT_H];
-        static bool font_data_initialized = false;
-        if (!font_data_initialized) {
-                if (!draw_line_init(font_data)) {
-                        return false;
-                }
-                font_data_initialized = true;
+        if (!font_data_initialized && !draw_line_init(font_data)) {
+                return false;
         }
         int idx = 0;
-        enum {
-                WIDTH = FONT_W + 1, ///< adding 1 pix space between letters
-        };
+        const uint32_t bg = solid ? 0xFF000000U : 0;
         while (*text) {
-                char c = *text;
-                if (c < ' ' || c > '~') {
-                        c = '?';
-                }
-                c -= ' ';
-                for (int j = 0; j < FONT_H; ++j) {
-                        for (int i = 0; i < FONT_W; ++i) {
-                                int pos_x = (FONT_W * c + i) / 8;
-                                int mask = 1 << (FONT_W - ((FONT_W * c + i) % 8));
-                                int offset = (FONT_W * FONT_COUNT + 7) / 8 * j;
-                                if (font_data[offset + pos_x] & mask) {
-                                        buf[j * pitch + 4 * (i + idx * WIDTH)] = color & 0xFFU;
-                                        buf[j * pitch + 4 * (i + idx * WIDTH) + 1] = (color >> 8U) & 0xFFU;
-                                        buf[j * pitch + 4 * (i + idx * WIDTH) + 2] = (color >> 16U) & 0xFFU;
-                                        buf[j * pitch + 4 * (i + idx * WIDTH) + 3] = (color >> 24U) & 0xFFU;
-                                } else if (solid) {
-                                        buf[j * pitch + 4 * (i + idx * WIDTH)] =
-                                                buf[j * pitch + 4 * (i + idx * WIDTH) + 1] =
-                                                buf[j * pitch + 4 * (i + idx * WIDTH) + 2] = 0;
-                                        buf[j * pitch + 4 * (i + idx * WIDTH) + 3] = 0xFFU;
-                                }
-                        }
-                        if (solid) { // fill space between characters
-                                buf[j * pitch + 4 * ((WIDTH-1) + idx * WIDTH)] =
-                                        buf[j * pitch + 4 * ((WIDTH-1) + idx * WIDTH) + 1] =
-                                        buf[j * pitch + 4 * ((WIDTH-1) + idx * WIDTH) + 2] = 0;
-                                buf[j * pitch + 4 * ((WIDTH-1) + idx * WIDTH) + 3] = 0xFFU;
-                        }
-                }
-                if ((++idx + 1) * WIDTH * 4 > pitch) {
+                char c = *text++;
+                draw_letter(c, color, bg,
+                            (unsigned char *) buf +
+                                (size_t) (4 * idx * FONT_W_SPACE),
+                            font_data, pitch);
+                if ((++idx + 1) * FONT_W_SPACE * 4 > pitch) {
                         return true;
                 }
-                ++text;
+        }
+
+        return true;
+}
+
+/**
+ * similar to draw_line() but integer upscaling can be applied
+ *
+ * transparency not supported/implemented
+ *
+ * @param bg  must not be 0, use 0xFF<<24 (alpha set to 0xFF)
+ */
+bool
+draw_line_scaled(char *buf, int pitch, const char *text, uint32_t fg,
+                 uint32_t bg, unsigned scale)
+{
+        (void) buf;
+        assert(scale > 0);
+        assert(bg != 0); // draw letter would than assume transparency which
+                         // doesn't work with the _scaled version
+        if (!font_data_initialized && !draw_line_init(font_data)) {
+                return false;
+        }
+        int idx = 0;
+        while (*text) {
+                char c = *text++;
+                unsigned char letter[4 * FONT_W_SPACE * FONT_H];
+                draw_letter(c, fg, bg, letter, font_data, 4 * FONT_W_SPACE);
+                // resize
+                for (unsigned y = 0; y < FONT_H; ++y) {
+                        for (unsigned x = 0; x < FONT_W_SPACE; ++x) {
+                                for (unsigned sv = 0; sv < scale; ++sv) {
+                                        for (unsigned sh = 0; sh < scale; ++sh) {
+                                                memcpy(buf + ((scale * y + sv) * pitch + (((idx * scale * FONT_W_SPACE)
+                                                           + (x * scale + sh)) * 4)), letter + (4 * (y * FONT_W_SPACE + x)), 4);
+                                        }
+                                }
+                        }
+                }
+                if ((++idx + 1) * FONT_W_SPACE * 4 * scale > (unsigned) pitch) {
+                        return true;
+                }
         }
 
         return true;

@@ -13,7 +13,7 @@
  */
 /*
  * Copyright (c) 2005-2006 University of Glasgow
- * Copyright (c) 2005-2024 CESNET
+ * Copyright (c) 2005-2025 CESNET, zájmové sdružení právnických osob
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -60,10 +60,11 @@
 #include <utility>
 #include <vector>
 
-#include "color.h"
+#include "color_space.h"
 #include "debug.h"
 #include "pixfmt_conv.h"
 #include "ug_runtime_error.hpp"
+#include "utils/bitmap_font.h"         // for FONT_H
 #include "utils/color_out.h"
 #include "utils/macros.h"
 #include "utils/string_view_utils.hpp"
@@ -72,7 +73,7 @@
 #include "video_capture/testcard_common.h"
 #include "video_pattern_generator.h"
 
-#define BLANK_USAGE "blank[=0x<AABBGGRR>]"
+#define BLANK_USAGE "blank[=<color>|help]"
 #define MOD_NAME "[vid. patt. generator] "
 constexpr size_t headroom = 128; // headroom for cases when dst color_spec has wider block size
 constexpr int rg48_bpp = 6;
@@ -99,6 +100,55 @@ enum class generator_depth {
         bits8, ///< RGBA
         bits16 ///< RG48
 };
+
+/**
+ * @todo move to some of common files (video* ?) and link
+ * externally later when there will be more users of the function.
+ * @reutrns 4B color (uint32_t) or -1 if error
+ */
+static long long
+get_color_by_name(const char *col)
+{
+        static const struct {
+                const char *name;
+                uint32_t    val;
+        } colors[] = {
+                { "white",   0xFFFFFFU },
+                { "gray",    0x7F7F7FU },
+                { "black",   0x000000U },
+                { "red",     0x0000FFU },
+                { "green",   0x00FF00U },
+                { "blue",    0xFF0000U },
+                { "yellow",  0x00FFFFU },
+                { "magenta", 0xFF00FFU },
+                { "cyan",    0xFFFF00U },
+        };
+
+        if (strcmp(col, "help") == 0) {
+                color_printf("color in format " TBOLD("0x<AABBGGRR>") " or a symbolic name\n");
+                color_printf("Leading zeros can be omitted, eg. "
+                             "`0xFF` produces a red pattern.\n");
+                color_printf("\nfollowing symbolic names can be also used:\n");
+                for (unsigned i = 0; i < ARR_COUNT(colors); ++i) {
+                        color_printf("\t- " TBOLD("%s") "\n", colors[i].name);
+                }
+                color_printf("\n");
+                return -1;
+        }
+        char *endptr = nullptr;
+        errno = 0;
+        unsigned long val = strtoul(col, &endptr, 0);
+        if (errno == 0 && endptr[0] == '\0') {
+                return (uint32_t) val;
+        }
+        for (unsigned i = 0; i < ARR_COUNT(colors); ++i) {
+                if (strcasecmp(col, colors[i].name) == 0) {
+                        return 0xFFU << 24 | colors[i].val;
+                }
+        }
+        MSG(ERROR, "Unknown color: %s. Use 'help' for possible values.\n", col);
+        return -1;
+}
 
 class image_pattern {
         public:
@@ -162,10 +212,23 @@ class image_pattern_bars : public image_pattern {
         public:
         explicit image_pattern_bars(string const &init) {
                 if (init == "help"s) {
-                        col() << "Testcard bar usage:\n\t" << SBOLD(SRED("-t testcard:pattern=bars") << "[=text]") << " - optionally annotate with text" << "\n";
+                        col() << "Testcard bar usage:\n\t"
+                              << SBOLD(SRED("-t testcard:pattern=bars")
+                                       << "[=<text>[,XYpt]]")
+                              << " - optionally annotate with text (+ opt font size)" << "\n";
                         throw 1;
                 }
                 annotate = init;
+
+                const char *last_comma = strrchr(init.c_str(), ',');
+                if (last_comma != nullptr) {
+                        char *endptr = nullptr;
+                        long val = strtol(last_comma + 1, &endptr, 10);
+                        if (strcmp(endptr, "pt") == 0) {
+                                annotate.resize(annotate.rfind(','));
+                                scale = (val + FONT_H - 1) / FONT_H;
+                        }
+                }
         }
         private:
         enum generator_depth fill(int width, int height, unsigned char *data) override {
@@ -208,11 +271,14 @@ class image_pattern_bars : public image_pattern {
                         }
                 }
                 if (!annotate.empty()) {
-                        draw_line((char *) data, width * 4, annotate.c_str(), 0xFFFFFFFF, true);
+                        draw_line_scaled((char *) data, width * 4,
+                                         annotate.c_str(), 0xFFFFFFFF,
+                                         0xFF000000, scale);
                 }
                 return generator_depth::bits8;
         }
         string annotate;
+        int scale = 6;
 };
 
 /**
@@ -310,16 +376,18 @@ class image_pattern_blank : public image_pattern {
                         if (init == "help"s) {
                                 color_printf("Testcard " TBOLD("blank") " usage:\n");
                                 color_printf("\t" TRED(TBOLD(
-                                    "-t testcard:patt=" BLANK_USAGE)) "\n");
-                                color_printf(
-                                    "\nLeading zeros can be omitted, eg. "
-                                    "`0xFF` produces a red pattern.\n");
+                                    "-t testcard:patt=" BLANK_USAGE)) "\n\n");
+                                get_color_by_name("help");
                                 color_printf(
                                     "Defaults to 0xFF000000.\n");
                                 throw 1;
                         }
                         if (!init.empty()) {
-                                color = stoll(init, nullptr, 0);
+                                const long long c = get_color_by_name(init.c_str());
+                                if (c == -1) {
+                                        throw 1;
+                                }
+                                color = c;
                         }
                 }
 
@@ -337,7 +405,11 @@ class image_pattern_gradient : public image_pattern {
         public:
                 explicit image_pattern_gradient(const string &config) {
                         if (!config.empty()) {
-                                color = stol(config, nullptr, 0);
+                                long long c = get_color_by_name(config.c_str());
+                                if (c == -1) {
+                                        throw 1;
+                                }
+                                color = c;
                         }
                 }
                 static constexpr uint32_t red = 0xFFU;
@@ -527,7 +599,11 @@ class image_pattern_text : public image_pattern {
         public:
                 explicit image_pattern_text(const string & config) {
                         if (config == "help"s) {
-                                col() << "Testcard text usage:\n\t" << SBOLD(SRED("-t testcard:pattern=text") << "[=pattern][,bg=0x<AABBGGRR<][,fg=0x<AABBGGRR>]") << "\n";
+                                col() << "Testcard text usage:\n\t"
+                                      << SBOLD(SRED("-t testcard:pattern=text")
+                                               << "[=pattern][,bg=0x<col>|help]"
+                                                  "[,fg=<col>|help]")
+                                      << "\n";
                                 throw 1;
                         }
                         if (!config.empty()) {
@@ -535,10 +611,19 @@ class image_pattern_text : public image_pattern {
                                 bool text_set = false;
                                 while (!sv.empty()) {
                                         auto tok = tokenize(sv, ',');
-                                        if (tok.substr(0,3) == "bg=") {
-                                                bg = stol((string) tok.substr(3), nullptr, 0);
-                                        } else if (tok.substr(0,3) == "fg=") {
-                                                fg = stol((string) tok.substr(3), nullptr, 0);
+                                        if (tok.substr(0,3) == "bg=" || tok.substr(0,3) == "fg=") {
+                                                auto key = tokenize(tok, '=');
+                                                auto val = tokenize(tok, '=');
+                                                long long c = get_color_by_name(
+                                                    ((string) val).c_str());
+                                                if (c == -1) {
+                                                        throw 1;
+                                                }
+                                                if (key == "bg") {
+                                                        bg = c;
+                                                } else {
+                                                        fg = c;
+                                                }
                                         } else if (!text_set) {
                                                 text = tok;
                                                 text_set = true;
@@ -570,7 +655,14 @@ class image_pattern_diagonal : public image_pattern{
         public:
                 explicit image_pattern_diagonal(const string & config) {
                         if (config == "help"s) {
-                                col() << "Testcard diagonal usage:\n\t" << SBOLD(SRED("-t testcard:pattern=diagonal") << "[,bg=0x<AABBGGRR<][,fg=0x<AABBGGRR>][,stride=<stride>][,line_width=<width>]") << "\n";
+                                col()
+                                    << "Testcard diagonal usage:\n\t"
+                                    << SBOLD(
+                                           SRED("-t testcard:pattern=diagonal")
+                                           << "[,bg=<color>|help][,fg=<color>|"
+                                              "help][,stride=<stride>][,line_"
+                                              "width=<width>]")
+                                    << "\n";
                                 throw 1;
                         }
                         if (!config.empty()) {
@@ -579,10 +671,17 @@ class image_pattern_diagonal : public image_pattern{
                                         auto tok = tokenize(sv, ',');
                                         auto key = tokenize(tok, '=');
                                         auto val = tokenize(tok, '=');
-                                        if (key == "bg") {
-                                                bg = stol((string) val, nullptr, 0);
-                                        } else if (key == "fg") {
-                                                fg = stol((string) val, nullptr, 0);
+                                        if (key == "bg" || key == "fg") {
+                                                long long c = get_color_by_name(
+                                                    ((string) val).c_str());
+                                                if (c == -1) {
+                                                        throw 1;
+                                                }
+                                                if (key == "bg") {
+                                                        bg = c;
+                                                } else {
+                                                        fg = c;
+                                                }
                                         } else if (key == "stride") {
                                                 stride = stol((string) val, nullptr, 0);
                                         } else if (key == "line_width") {
@@ -834,11 +933,11 @@ video_pattern_generator_create(const char *config, int width, int height, codec_
                 col() << "Pattern to use, one of: \n";
                 for (const auto *p :
                      {
-                        "bars",
+                        "bars[=<text>[,XYpt]]",
                         BLANK_USAGE,
                         "diagonal*",
                         "ebu_bars",
-                        "gradient[=0x<AABBGGRR>]",
+                        "gradient[=<color>|help]",
                         "gradient2*",
                         "gray",
                         "interlaced",

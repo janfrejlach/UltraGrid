@@ -49,7 +49,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "color.h"
+#include "color_space.h"
 #include "compat/net.h"                        // for htonl
 #include "compat/qsort_s.h"
 #include "debug.h"
@@ -1114,6 +1114,7 @@ static void r12l_to_gbrp16le(AVFrame * __restrict out_frame, const unsigned char
 static void r12l_to_gbrp12le(AVFrame * __restrict out_frame, const unsigned char * __restrict in_data, int width, int height)
 {
         r12l_to_gbrpXXle(out_frame, in_data, width, height, 12U);
+        memset(out_frame->data[1], 255, 5000);
 }
 
 static void rg48_to_gbrp12le(AVFrame * __restrict out_frame, const unsigned char * __restrict in_data, int width, int height)

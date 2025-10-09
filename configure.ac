@@ -1304,7 +1304,7 @@ sdl_version=
 sdl_version_str=
 sdl_ver_suffix=
 AC_ARG_ENABLE(sdl,
-              AS_HELP_STRING([--enable-sdl[=1|2|3]], [enable SDL (optionally with version(s); default is auto), ]
+              AS_HELP_STRING([--enable-sdl@<:@=1|2|3@:>@], [enable SDL (optionally with version(s); default is auto), ]
               [requires: sdl >= 1.2.14 | sdl2 | sdl3 >= 3.2.0]),
               [sdl_req=$enableval],
               [sdl_req=$build_default]
@@ -1740,59 +1740,59 @@ ENSURE_FEATURE_PRESENT([$blank_req], [$blank], [Blank dep not found (libswscale)
 # -------------------------------------------------------------------------------------------------
 # Testcard stuff
 # -------------------------------------------------------------------------------------------------
-AC_ARG_ENABLE(testcard-extras,
-      AS_HELP_STRING([--enable-testcard-extras[=ttf|all]], [enable testcard addons - audio and testcard2 (default is auto)]
+AC_ARG_ENABLE(testcard2,
+      AS_HELP_STRING([--enable-testcard2@<:@=@<:@no@:>@ttf@:>@], [enable testcard2 (default is auto)]
       [This includes testcard2 (optionally with TTF).]
-      [Requires: SDL(2)_ttf (optional)]),
-    [testcard_extras_req=$enableval],
-    [testcard_extras_req=$build_default]
+      [Requires: SDL_ttf (optional)]),
+    [testcard2_req=$enableval],
+    [testcard2_req=$build_default]
     )
 
 FOUND_SDL_TTF=no
-testcard2_req=auto
-testcard_sdl_ttf_req=auto
-
 testcard2=no
-testcard_sdl_ttf=no
+testcard2_sdl_ttf_req=auto
 
-if test $testcard_extras_req = "no"; then
-        testcard2_req=no
-        testcard_sdl2_ttf_req=no
-fi
-if test $testcard_extras_req = "yes"; then
-        testcard2_req=yes
-fi
-if expr "x$testcard_extras_req" : 'x.*all' >/dev/null; then
-        testcard_sdl_ttf_req=yes
-fi
-if expr "x$testcard_extras_req" : 'x.*ttf' >/dev/null; then
-        testcard_sdl_ttf_req=yes
-fi
+case "${testcard2_req?}" in
+        auto|no|yes)
+                ;;
+        ttf)
+                testcard2_req=yes
+                testcard2_sdl_ttf_req=yes
+                ;;
+        nottf)
+                testcard2_req=yes
+                testcard2_sdl_ttf_req=no
+                ;;
+        *)
+                AC_MSG_ERROR([Wrong option for testcard2 $testcard2_req!]);
+                ;;
+esac
 
 if test $testcard2_req != no
 then
         TESTCARD2_OBJ="src/video_capture/testcard2.o"
-        if test "$sdl_version" -lt 3; then
-                PKG_CHECK_MODULES([SDL_TTF], [SDL${sdl_ver_suffix}_ttf],
-                                  [FOUND_SDL_TTF=yes], [FOUND_SDL_TTF=no])
-        else
-                PKG_CHECK_MODULES([SDL_TTF], [sdl${sdl_ver_suffix}-ttf],
-                                  [FOUND_SDL_TTF=yes], [FOUND_SDL_TTF=no])
+        if test "${testcard2_sdl_ttf_req?}" != no; then
+                if test "${sdl_version?}" -lt 3; then
+                        PKG_CHECK_MODULES([SDL_TTF], [SDL${sdl_ver_suffix}_ttf],
+                                          [FOUND_SDL_TTF=yes], [FOUND_SDL_TTF=no])
+                else
+                        PKG_CHECK_MODULES([SDL_TTF], [sdl${sdl_ver_suffix}-ttf],
+                                          [FOUND_SDL_TTF=yes], [FOUND_SDL_TTF=no])
+                fi
+                if test "${FOUND_SDL_TTF?}" = yes
+                then
+                        SDL_TTF_LIBS=$(remove_mwindows "${SDL_TTF_LIBS?}")
+                        TESTCARD2_LIB="${TESTCARD2_LIB-} ${SDL_TTF_LIBS?}"
+                        AC_DEFINE([HAVE_LIBSDL_TTF], [1], [Build testcard2 with TTF support])
+                fi
         fi
-        SDL_TTF_LIBS=$(remove_mwindows "$SDL_TTF_LIBS")
-        if test "$FOUND_SDL_TTF" = yes
-        then
-                TESTCARD2_LIB="$TESTCARD2_LIB $SDL_TTF_LIBS"
-                AC_DEFINE([HAVE_LIBSDL_TTF], [1], [Build testcard2 with TTF support])
-        fi
-        add_module vidcap_testcard2 "$TESTCARD2_OBJ" "$TESTCARD2_LIB"
+        add_module vidcap_testcard2 "${TESTCARD2_OBJ?}" "${TESTCARD2_LIB-}"
         testcard2=yes
 fi
 
-if { test $testcard2_req = yes && test $testcard2 = no ;} \
-                || { test $testcard_sdl_ttf_req = yes && test $FOUND_SDL_TTF = no ;} ; then
-        AC_MSG_ERROR([Testcard2 dependencies not found])
-fi
+# ensuring testcard2 itself unneeded - no dependencies
+ENSURE_FEATURE_PRESENT([${testcard2_sdl_ttf_req?}], [${FOUND_SDL_TTF?}],
+                       [SDL_ttf for testcard2 not found])
 
 # -------------------------------------------------------------------------------------------------
 # libavcodec hw-accelerated decoding support
@@ -1983,7 +1983,14 @@ AC_ARG_ENABLE(file,
         [file_req=$build_default]
 )
 
-if test $file_req != no && test $libavcodec = yes && test $libswscale = yes; then
+if test "${file_req?}" = no; then
+        unset missing_item
+elif test "${libavcodec?}" != yes; then
+        missing_item=libavcodec
+elif test "${libswscale?}" != yes; then
+        missing_item=libswscale
+else
+        missing_item=libavformat
         PKG_CHECK_MODULES([LIBAVFORMAT], [libavformat], [found_libavformat=yes], [found_libavformat=no])
         if test "$found_libavformat" != yes; then
                 SAVED_LIBS=$LIBS
@@ -2010,7 +2017,8 @@ src/video_capture/file.o "$LIBAVCODEC_LIBS $LIBAVFORMAT_LIBS $LIBSWSCALE_LIBS"
         fi
 fi
 
-ENSURE_FEATURE_PRESENT([$vidcap_file_req], [$vidcap_file], [Vidcap file input dependencies not found])
+ENSURE_FEATURE_PRESENT([${file_req?}], [${file?}], [Vidcap file input ]dnl
+[dependencies not found: ${missing_item?}])
 
 # -------------------------------------------------------------------------------------------------
 # DRM display
@@ -2201,7 +2209,7 @@ sc_details=
 
 AC_ARG_ENABLE(screen,
 [  --disable-screen        disable screen capture (default is auto)]
-[  --enable-screen=[x11,pipewire]  [Linux only] choose implementation (can be both)]
+[  --enable-screen@<:@=x11,pipewire@:>@  @<:@Linux only@:>@ choose implementation (can be both)]
 [                          Requires: none (OSX) x11 or pipewire (Linux) dshow (Win)],
     [screen_cap_req=$enableval],
     [screen_cap_req=$build_default]
@@ -3704,7 +3712,7 @@ RESULT=`add_column "$RESULT" "SDP over HTTP" $sdp_http $?`
 RESULT=`add_column "$RESULT" "Spout" $spout $?`
 RESULT=`add_column "$RESULT" "Swscale support" $libswscale $?`
 RESULT=`add_column "$RESULT" "Syphon" $syphon $?`
-RESULT=`add_column "$RESULT" "Testcard extras (TTF: $FOUND_SDL_TTF)" \
+RESULT=`add_column "$RESULT" "Testcard2 (TTF: $FOUND_SDL_TTF)" \
 $testcard2 $?`
 RESULT=`add_column "$RESULT" "Text postprocess and filter" $text $?`
 RESULT=`end_section "$RESULT"`

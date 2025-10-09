@@ -167,6 +167,7 @@ static void vidcap_file_show_help(bool full) {
         }
 }
 
+// s->lock must be held when calling this function
 static void flush_captured_data(struct vidcap_state_lavf_decoder *s) {
         struct video_frame *f = NULL;
         while ((f = simple_linked_list_pop(s->video_frame_queue)) != NULL) {
@@ -346,7 +347,17 @@ static void print_current_pos(struct vidcap_state_lavf_decoder *s,
         s->last_stream_stat = t;
 }
 
-#define CHECK_FF(cmd, action_failed) do { int rc = cmd; if (rc < 0) { char buf[1024]; av_strerror(rc, buf, 1024); log_msg(LOG_LEVEL_ERROR, MOD_NAME #cmd ": %s\n", buf); action_failed} } while(0)
+#define CHECK_FF(cmd, action_failed) \
+        do { \
+                int rc = cmd; \
+                if (rc < 0) { \
+                        char buf[1024]; \
+                        av_strerror(rc, buf, 1024); \
+                        log_msg(LOG_LEVEL_ERROR, MOD_NAME #cmd ": %s\n", buf); \
+                        action_failed; \
+                } \
+        } while (0)
+// s->lock must be held when calling this function
 static void vidcap_file_process_messages(struct vidcap_state_lavf_decoder *s) {
         struct msg_universal *msg;
         while ((msg = (struct msg_universal *) check_message(&s->mod)) != NULL) {
@@ -465,6 +476,30 @@ static void print_packet_info(const AVPacket *pkt, const AVStream *st) {
                 pts_val, dts_val, pkt->duration, tb.num, tb.den, pkt->size);
 }
 
+static void
+rewind_file(struct vidcap_state_lavf_decoder *s)
+{
+        bool avseek_failed = false;
+        CHECK_FF(avformat_seek_file(s->fmt_ctx, -1, INT64_MIN,
+                                    s->fmt_ctx->start_time, INT64_MAX, 0),
+                 avseek_failed = true);
+        const bool mjpeg = s->vid_ctx->codec_id == AV_CODEC_ID_MJPEG &&
+                           s->fmt_ctx->ctx_flags & AVFMTCTX_NOHEADER;
+        if (avseek_failed || mjpeg) {
+                // handle single JPEG loop, inspired by libavformat's
+                // seek_frame_generic because img_read_seek
+                // (AVInputFormat::read_seek) doesn't do the job - seeking is
+                // inmplemeted just in img2dec if VideoDemuxData::loop == 1
+                // used also for AnnexB HEVC stream (avformat_seek_file fails)
+                CHECK_FF(
+                    avio_seek(s->fmt_ctx->pb, s->video_stream_idx, SEEK_SET),
+                    {});
+        }
+        pthread_mutex_lock(&s->lock);
+        flush_captured_data(s);
+        pthread_mutex_unlock(&s->lock);
+}
+
 #define FAIL_WORKER { pthread_mutex_lock(&s->lock); s->failed = true; pthread_mutex_unlock(&s->lock); pthread_cond_signal(&s->new_frame_ready); return NULL; }
 static void *vidcap_file_worker(void *state) {
         set_thread_name(__func__);
@@ -497,9 +532,7 @@ static void *vidcap_file_worker(void *state) {
                 int ret = av_read_frame(s->fmt_ctx, pkt);
                 if (ret == AVERROR_EOF) {
                         if (s->loop) {
-                                CHECK_FF(avio_seek(s->fmt_ctx->pb, s->video_stream_idx, SEEK_SET), {}); // handle single JPEG loop, inspired by libavformat's seek_frame_generic because img_read_seek (AVInputFormat::read_seek) doesn't do the job - seeking is inmplemeted just in img2dec if VideoDemuxData::loop == 1
-                                CHECK_FF(avformat_seek_file(s->fmt_ctx, -1, INT64_MIN, s->fmt_ctx->start_time, INT64_MAX, 0), FAIL_WORKER);
-                                flush_captured_data(s);
+                                rewind_file(s);
                                 log_msg(LOG_LEVEL_NOTICE, MOD_NAME "Rewinding the file.\n");
                                 continue;
                         } else {
@@ -666,7 +699,8 @@ static bool setup_video(struct vidcap_state_lavf_decoder *s) {
         AVStream *st = s->fmt_ctx->streams[s->video_stream_idx];
         s->video_desc.width = st->codecpar->width;
         s->video_desc.height = st->codecpar->height;
-        s->video_desc.fps = (double)st->r_frame_rate.num / st->r_frame_rate.den;
+        s->video_desc.fps =
+            (double) st->avg_frame_rate.num / st->avg_frame_rate.den;
         s->video_desc.tile_count = 1;
         if (s->no_decode) {
                 s->video_desc.color_spec =

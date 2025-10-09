@@ -502,9 +502,10 @@ const std::vector<CodecToVulkanFormat>& get_ug_to_vkd_format_mapping(state_vulka
                 {RGB,  vkd::Format::RGB8},
                 {UYVY, vkd::Format::UYVY8_422},
                 {UYVY, vkd::Format::UYVY8_422_conv},
+                {VUYA, vkd::Format::VUYA8_4444_conv},
                 {YUYV, vkd::Format::YUYV8_422},
                 {Y216, vkd::Format::YUYV16_422},
-                {Y416, vkd::Format::UYVA16_422_conv},
+                {Y416, vkd::Format::UYVA16_4444_conv},
                 {R10k, vkd::Format::RGB10A2_conv},
                 {RG48, vkd::Format::RGB16},
         }};
@@ -751,7 +752,7 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
                 log_msg(LOG_LEVEL_ERROR, "Unable to initialize SDL2 video: %s\n", SDL_GetError());
                 return nullptr;
         }
-        log_msg(LOG_LEVEL_NOTICE, "[SDL] Using driver: %s\n", SDL_GetCurrentVideoDriver());
+        MSG(NOTICE, "Using driver: %s\n", SDL_GetCurrentVideoDriver());
 
         SDL_ShowCursor(args.cursor);
         SDL_DisableScreenSaver();

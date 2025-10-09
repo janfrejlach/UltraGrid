@@ -57,11 +57,6 @@ using namespace vulkan_display_detail;
 using namespace vulkan_display;
 
 namespace {
-constexpr bool is_yCbCr_format(vk::Format format) {
-        auto f = static_cast<VkFormat>(format);
-        return VK_FORMAT_G8B8G8R8_422_UNORM <= f && f <= VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM;
-}
-
 vk::PresentModeKHR get_present_mode(bool vsync_enabled, bool tearing_permitted){
         using Mode = vk::PresentModeKHR;
         if (vsync_enabled){
@@ -317,7 +312,7 @@ void VulkanDisplay::destroy() {
 bool VulkanDisplay::is_image_description_supported(ImageDescription description) {
         std::scoped_lock lock(device_mutex);
 
-        auto& format_info = description.format_info();
+        const auto& format_info = description.format_info();
         if(!is_format_supported(context.get_gpu(), context.is_yCbCr_supported(), get_buffer_size(description),
                 format_info.buffer_format, vk::ImageTiling::eLinear, vk::ImageUsageFlagBits::eSampled))
         {
@@ -467,7 +462,7 @@ bool VulkanDisplay::queue_image(TransferImage image, bool discardable) {
 
 void VulkanDisplay::reconfigure(const TransferImageImpl& transfer_image){
         auto image_description = transfer_image.get_image_description();
-        auto& image_format_info = image_description.format_info();
+        const auto& image_format_info = image_description.format_info();
 
         if (image_description != current_image_description) {
                 log_msg(LOG_LEVEL_INFO, MOD_NAME "Recreating render_pipeline\n");
@@ -476,7 +471,7 @@ void VulkanDisplay::reconfigure(const TransferImageImpl& transfer_image){
 
                 destroy_format_dependent_resources();
 
-                format_conversion_enabled = !image_format_info.conversion_shader.empty();
+                format_conversion_enabled = strlen(image_format_info.conversion_shader) != 0;
 
                 render_pipeline.reconfigure(device, format_conversion_enabled ?
                         image_format_info.conversion_image_format : image_format_info.buffer_format);
@@ -646,11 +641,23 @@ bool VulkanDisplay::display_queued_image() {
 }
 
 void VulkanDisplay::window_parameters_changed(WindowParameters new_parameters) {
-        if (new_parameters != context.get_window_parameters() && !new_parameters.is_minimized()) {
+        if (new_parameters == context.get_window_parameters() || new_parameters.is_minimized()) {
+                return;
+        }
+        {
                 std::scoped_lock lock{device_mutex};
                 context.recreate_swapchain(new_parameters, render_pipeline.get_render_pass());
                 auto render_area_size = context.get_render_area_size();
                 render_pipeline.update_render_area(render_area_size, current_image_description.size);
+        }
+
+        // re-render some recent image for the case that no video is arriving:
+        // 1. to have defined content
+        // 2. with Wayland, to perform the changes (without content refresh, the
+        // window isn't resized)
+        auto *last_image = available_img_queue.try_pop();
+        if (last_image != nullptr) {
+                queue_image(TransferImage{ *last_image }, true);
         }
 }
 

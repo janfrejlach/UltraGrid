@@ -511,8 +511,9 @@ const std::vector<CodecToVulkanFormat>& get_ug_to_vkd_format_mapping(state_vulka
                 {UYVY, vkd::Format::UYVY8_422},
                 {UYVY, vkd::Format::UYVY8_422_conv},
                 {YUYV, vkd::Format::YUYV8_422},
+                {VUYA, vkd::Format::VUYA8_4444_conv},
                 {Y216, vkd::Format::YUYV16_422},
-                {Y416, vkd::Format::UYVA16_422_conv},
+                {Y416, vkd::Format::UYVA16_4444_conv},
                 {R10k, vkd::Format::RGB10A2_conv},
                 {RG48, vkd::Format::RGB16},
         }};
@@ -788,18 +789,12 @@ void* display_vulkan_init(module* parent, const char* fmt, unsigned int flags) {
                 }
         }
 
-        bool ret = SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-        if (!ret) {
-                log_msg(LOG_LEVEL_ERROR, "Unable to initialize SDL3: %s\n", SDL_GetError());
-                return nullptr;
-        }
-
         if (!args.driver.empty()) {
                 SDL_CHECK(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, args.driver.c_str()));
         }
-        ret = SDL_InitSubSystem(SDL_INIT_VIDEO);
+        bool ret = SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
         if (!ret) {
-                log_msg(LOG_LEVEL_ERROR, "Unable to initialize SDL3 video: %s\n", SDL_GetError());
+                log_msg(LOG_LEVEL_ERROR, "Unable to initialize SDL3: %s\n", SDL_GetError());
                 return nullptr;
         }
         MSG(NOTICE, "Using driver: %s\n", SDL_GetCurrentVideoDriver());

@@ -57,9 +57,11 @@
 #include <stddef.h>                              // for NULL, ptrdiff_t, size_t
 #include <stdint.h>
 
-#include "color.h"
+#include "color_space.h"
 #include "compat/qsort_s.h"
+#ifdef HAVE_CONFIG_H
 #include "config.h"       // for HWACC_VDPAU
+#endif
 #include "debug.h"
 #include "host.h"
 #include "hwaccel_vdpau.h"
@@ -1042,6 +1044,7 @@ yuv422p_to_v210(struct av_conv_data d)
         }
 }
 
+#if VUYX_PRESENT
 static void
 yuv444p_to_vuya(struct av_conv_data d)
 {
@@ -1066,6 +1069,7 @@ yuv444p_to_vuya(struct av_conv_data d)
                 }
         }
 }
+#endif // VUYX_PRESENT
 
 static void
 yuv444p_to_uyvy(struct av_conv_data d)

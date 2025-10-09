@@ -12,7 +12,7 @@
  * usage and also SignalGenerator was used for scheduled playback.
  */
 /*
- * Copyright (c) 2010-2024 CESNET, z. s. p. o.
+ * Copyright (c) 2010-2025 CESNET, zájmové sdružení právnických osob
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -629,7 +629,7 @@ show_help(bool full, const char *query_prop_fcc = nullptr)
 
         col() << "\nRecognized pixel formats:";
         for_each(uv_to_bmd_codec_map.cbegin(), uv_to_bmd_codec_map.cend(), [](auto const &i) { col() << " " << SBOLD(get_codec_name(i.first)); } );
-        cout << "\n";
+        cout << "\n\n";
 
         col() << "Devices (idx, topological ID, name):\n";
         // Create an IDeckLinkIterator object to enumerate all DeckLink cards in the system
@@ -2230,9 +2230,9 @@ print_output_modes(IDeckLink *deckLink, const char *query_prop_fcc)
                         int modeHeight = displayMode->GetHeight();
                         uint32_t field_dominance_n = ntohl(displayMode->GetFieldDominance());
                         displayMode->GetFrameRate(&frameRateDuration, &frameRateScale);
-                        printf(
-                            "\t\t%2d) %-20s  %d x %d \t %2.2f FPS %.4s, "
-                            "flags: %s\n",
+                        color_printf(
+                            "\t    " TBOLD("%2d")") %-14s  %d x %d\t%2.2f FPS %.4s, "
+                            "flgs: %s\n",
                             displayModeNumber,
                             get_str_from_bmd_api_str(displayModeString).c_str(),
                             modeWidth, modeHeight,
@@ -2247,7 +2247,7 @@ print_output_modes(IDeckLink *deckLink, const char *query_prop_fcc)
 
                 displayModeNumber++;
         }
-        color_printf("\n\tsupported pixel formats:" TERM_BOLD);
+        color_printf("\n\tsupported output pixel formats:" TERM_BOLD);
         for (auto & c : uv_to_bmd_codec_map) {
                 if (decklink_supports_codec(deckLinkOutput, c.second)) {
                         printf(" %s", get_codec_name(c.first));
@@ -2258,7 +2258,6 @@ print_output_modes(IDeckLink *deckLink, const char *query_prop_fcc)
         if (deckLink->QueryInterface(IID_IDeckLinkProfileAttributes,
                                      (void **) &deckLinkAttributes) == S_OK) {
                 if (query_prop_fcc != nullptr) {
-                        cout << "\n";
                         print_bmd_attribute(deckLinkAttributes, query_prop_fcc);
                 }
                 print_bmd_connections(deckLinkAttributes,
