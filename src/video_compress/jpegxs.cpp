@@ -6,6 +6,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <float.h>
 #include <svt-jpegxs/SvtJpegxsEnc.h>
 #include <svt-jpegxs/SvtJpegxsImageBufferTools.h>
 
@@ -33,6 +34,50 @@ using std::atomic;
 namespace {
 struct state_video_compress_jpegxs;
 
+struct measurement {
+        const char *name;
+
+        double total_time = 0.0;
+        double min_ms = DBL_MAX;
+        double max_ms = 0.0;
+
+        uint64_t skip = 60;
+        uint64_t count = 0;
+
+        void update(std::chrono::steady_clock::time_point start_time, std::chrono::steady_clock::time_point end_time);
+        void print();
+};
+
+void measurement::update(std::chrono::steady_clock::time_point start_time, std::chrono::steady_clock::time_point end_time) {
+        if (count < skip) {
+                count++;
+                return;
+        }
+        
+        auto diff = end_time - start_time;
+        double duration = std::chrono::duration<double, std::milli>(diff).count();
+
+        count++;
+        total_time += duration;
+        if (duration < min_ms) min_ms = duration;
+        if (duration > max_ms) max_ms = duration;
+}
+
+void measurement::print() {
+        if (count < skip) {
+                log_msg(LOG_LEVEL_INFO, "%s: not enough samples\n", name);
+                return;
+        }
+        
+        double avg = total_time / (count - skip);
+
+        log_msg(LOG_LEVEL_INFO, "%s: avg=%.3f ms  min=%.3f ms  max=%.3f ms\n", name, avg, min_ms, max_ms);
+}
+
+struct timestamp {
+    std::chrono::steady_clock::time_point t;
+};
+
 struct state_video_compress_jpegxs {
         state_video_compress_jpegxs(struct module *parent, const char *opts);
 
@@ -47,6 +92,8 @@ struct state_video_compress_jpegxs {
                         svt_jpeg_xs_frame_pool_free(frame_pool);
                 }
                 svt_jpeg_xs_encoder_close(&encoder);
+                processing.print();
+                conversion.print();
         }
 
         svt_jpeg_xs_encoder_api_t encoder;
@@ -74,6 +121,9 @@ struct state_video_compress_jpegxs {
 
         atomic<uint64_t> frames_sent{0};
         atomic<uint64_t> frames_received{0};
+        
+        struct measurement processing = {"Processing"};
+        struct measurement conversion = {"Conversion"};
 };
 
 static bool configure_with(struct state_video_compress_jpegxs *s, struct video_desc desc);
@@ -133,7 +183,15 @@ while (true) {
         }
 
         struct tile *in_tile = vf_get_tile(frame.get(), 0);
+        
+        auto conversion_start = std::chrono::steady_clock::now();
         s->convert_to_planar((const uint8_t *) in_tile->data, in_tile->width, in_tile->height, &enc_input.image);
+        auto conversion_end = std::chrono::steady_clock::now();
+        s->conversion.update(conversion_start, conversion_end);
+
+        auto *stamp = new timestamp();
+        stamp->t = std::chrono::steady_clock::now();
+        enc_input.user_prv_ctx_ptr = stamp;
 
         err = svt_jpeg_xs_encoder_send_picture(&s->encoder, &enc_input, /*blocking*/ 1);
         if (err != SvtJxsErrorNone) {
@@ -170,6 +228,13 @@ while (true) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to get encoded packet, error code: %x\n", err);
                 continue;
         }
+
+        auto *stamp = static_cast<timestamp*>(enc_output.user_prv_ctx_ptr);
+        auto processing_start = stamp->t;
+        delete stamp;
+        auto processing_end = std::chrono::steady_clock::now();
+        s->processing.update(processing_start, processing_end);
+
         s->frames_received++;
 
         shared_ptr<video_frame> out_frame = s->pool.get_frame();
