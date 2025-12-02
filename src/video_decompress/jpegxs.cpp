@@ -7,6 +7,7 @@
 #include "video.h"
 #include "video_decompress.h"
 #include "jpegxs/jpegxs_conv.h"
+#include "jpegxs/jpegxs_measurement.h"
 
 #define MOD_NAME "[JPEG XS dec.] "
 
@@ -16,6 +17,8 @@ struct state_decompress_jpegxs {
                         svt_jpeg_xs_frame_pool_free(frame_pool);
                 }
                 svt_jpeg_xs_decoder_close(&decoder);
+                processing.print();
+                conversion.print();
         }
         svt_jpeg_xs_decoder_api_t decoder;
         svt_jpeg_xs_image_config_t image_config;
@@ -29,6 +32,9 @@ struct state_decompress_jpegxs {
         int rshift, gshift, bshift;
         int pitch;
         codec_t out_codec;
+
+        struct measurement processing = {"Processing"};
+        struct measurement conversion = {"Conversion"};
 };
 
 static void *jpegxs_decompress_init(void) {
@@ -162,6 +168,7 @@ static decompress_status jpegxs_decompress(void *state, unsigned char *dst, unsi
         }
         dec_input.bitstream = bitstream;
 
+        auto processing_start = std::chrono::steady_clock::now();
         err = svt_jpeg_xs_decoder_send_frame(&s->decoder, &dec_input, 1 /*blocking*/);
         if (err != SvtJxsErrorNone) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to send frame to decoder, error code: %x\n", err);
@@ -174,8 +181,13 @@ static decompress_status jpegxs_decompress(void *state, unsigned char *dst, unsi
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to get encoded packet, error code: %x\n", err);
                 return DECODER_NO_FRAME;
         }
+        auto processing_end = std::chrono::steady_clock::now();
+        s->processing.update(processing_start, processing_end);
 
+        auto conversion_start = std::chrono::steady_clock::now();
         s->convert_from_planar(&dec_output.image, s->image_config.width, s->image_config.height, dst);
+        auto conversion_end = std::chrono::steady_clock::now();
+        s->conversion.update(conversion_start, conversion_end);
         svt_jpeg_xs_frame_pool_release(s->frame_pool, &dec_output);
         return DECODER_GOT_FRAME;
 }

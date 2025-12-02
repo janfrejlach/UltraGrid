@@ -1,12 +1,10 @@
-#include <memory>
-#include <iostream>
-#include <string>
-#include <memory>
-#include <vector>
 #include <float.h>
 
 #include "debug.h"
 
+struct timestamp {
+    std::chrono::steady_clock::time_point t;
+};
 
 struct measurement {
         const char *name;
@@ -22,7 +20,7 @@ struct measurement {
         void print();
 };
 
-void measurement::update(std::chrono::steady_clock::time_point start_time, std::chrono::steady_clock::time_point end_time) {
+inline void measurement::update(std::chrono::steady_clock::time_point start_time, std::chrono::steady_clock::time_point end_time) {
         if (count < skip) {
                 count++;
                 return;
@@ -37,7 +35,7 @@ void measurement::update(std::chrono::steady_clock::time_point start_time, std::
         if (duration > max_ms) max_ms = duration;
 }
 
-void measurement::print() {
+inline void measurement::print() {
         if (count < skip) {
                 log_msg(LOG_LEVEL_INFO, "%s: not enough samples\n", name);
                 return;
@@ -47,7 +45,3 @@ void measurement::print() {
 
         log_msg(LOG_LEVEL_INFO, "%s: avg=%.3f ms  min=%.3f ms  max=%.3f ms\n", name, avg, min_ms, max_ms);
 }
-
-struct timestamp {
-    std::chrono::steady_clock::time_point t;
-};
