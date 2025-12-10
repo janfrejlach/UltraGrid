@@ -31,12 +31,14 @@ struct state_decompress_jpegxs {
         codec_t out_codec;
 };
 
+// Initialize the JPEG XS decompression module
 static void *jpegxs_decompress_init(void) {
         struct state_decompress_jpegxs *s = new state_decompress_jpegxs();
 
         return s;
 }
 
+// Configure and initialize the decoder
 static bool configure_with(struct state_decompress_jpegxs *s, unsigned char *bitstream_buffer, size_t codestream_size)
 {
         s->decoder.verbose = VERBOSE_SYSTEM_INFO;
@@ -44,12 +46,14 @@ static bool configure_with(struct state_decompress_jpegxs *s, unsigned char *bit
         s->decoder.use_cpu_flags = CPU_FLAGS_ALL;
         s->decoder.proxy_mode = proxy_mode_full;
 
+        // Initialize the decoder
         SvtJxsErrorType_t err = svt_jpeg_xs_decoder_init(SVT_JPEGXS_API_VER_MAJOR, SVT_JPEGXS_API_VER_MINOR, &s->decoder, bitstream_buffer, codestream_size, &s->image_config);
         if (err != SvtJxsErrorNone) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to initialize JPEG XS decoder\n");
                 return false;
         }
 
+        // Allocate JPEG XS frame pool (image and bitstream buffers)
         s->frame_pool = svt_jpeg_xs_frame_pool_alloc(&s->image_config, 0, 1);
         if (!s->frame_pool) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate JPEG XS frame pool\n");
@@ -60,6 +64,7 @@ static bool configure_with(struct state_decompress_jpegxs *s, unsigned char *bit
         return true;
 }
 
+// Reconfigure the decoder to specific output format
 static int jpegxs_decompress_reconfigure(void *state, struct video_desc desc,
         int rshift, int gshift, int bshift, int pitch, codec_t out_codec)
 {
@@ -83,6 +88,7 @@ static int jpegxs_decompress_reconfigure(void *state, struct video_desc desc,
         s->bshift = bshift;
         s->desc = desc;
 
+        // Select the correct conversion function from JPEG XS format to given UltraGrid output pixel format
         if (s->out_codec != VIDEO_CODEC_NONE) {
                 const struct jpegxs_to_uv_conversion *conv = get_jpegxs_to_uv_conversion(s->out_codec);
                 if (!conv || !conv->convert) {
@@ -100,6 +106,7 @@ static int jpegxs_decompress_reconfigure(void *state, struct video_desc desc,
         return true;
 }
 
+// Inspect the incoming bitstream and inform UltraGrid if recognized
 static decompress_status jpegxs_probe_internal_codec(struct state_decompress_jpegxs *s, struct pixfmt_desc *internal_prop, unsigned char *buffer, size_t buffer_size)
 {
         uint32_t size;
@@ -132,6 +139,7 @@ static decompress_status jpegxs_probe_internal_codec(struct state_decompress_jpe
         return DECODER_GOT_CODEC;
 }
 
+// Decode the JPEG XS bitstream
 static decompress_status jpegxs_decompress(void *state, unsigned char *dst, unsigned char *buffer, 
         unsigned int src_len, int frame_seq, struct video_frame_callbacks *callbacks, struct pixfmt_desc *internal_prop)
 {
@@ -139,10 +147,12 @@ static decompress_status jpegxs_decompress(void *state, unsigned char *dst, unsi
         UNUSED(callbacks);
         auto *s = (struct state_decompress_jpegxs *) state;
 
+        // Inspect the incoming bitstream 
         if (s->out_codec == VIDEO_CODEC_NONE) {
                 return jpegxs_probe_internal_codec(s, internal_prop, buffer, src_len);
         }
 
+        // Configure and initialize the decoder if not yet configured
         if (!s->configured) {
                 if (!configure_with(s, buffer, src_len)) {
                         return DECODER_NO_FRAME;
@@ -154,6 +164,7 @@ static decompress_status jpegxs_decompress(void *state, unsigned char *dst, unsi
         bitstream.used_size = src_len;
         bitstream.allocation_size = src_len;
 
+        // Get JPEG XS frame from the frame pool
         svt_jpeg_xs_frame_t dec_input;
         SvtJxsErrorType_t err = svt_jpeg_xs_frame_pool_get(s->frame_pool, &dec_input, /*blocking*/ 1);
         if (err != SvtJxsErrorNone) {
@@ -162,12 +173,14 @@ static decompress_status jpegxs_decompress(void *state, unsigned char *dst, unsi
         }
         dec_input.bitstream = bitstream;
 
+        // Send JPEG XS frame to the decoder
         err = svt_jpeg_xs_decoder_send_frame(&s->decoder, &dec_input, 1 /*blocking*/);
         if (err != SvtJxsErrorNone) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to send frame to decoder, error code: %x\n", err);
                 return DECODER_NO_FRAME;
         }
 
+        // Get decoded JPEG XS frame from the encoder
         svt_jpeg_xs_frame_t dec_output;
         err = svt_jpeg_xs_decoder_get_frame(&s->decoder, &dec_output, 1 /*blocking*/);
         if (err != SvtJxsErrorNone) {
@@ -175,6 +188,7 @@ static decompress_status jpegxs_decompress(void *state, unsigned char *dst, unsi
                 return DECODER_NO_FRAME;
         }
 
+        // Convert and copy decoded JPEG XS frame image buffer to the destination buffer
         s->convert_from_planar(&dec_output.image, s->image_config.width, s->image_config.height, dst);
         svt_jpeg_xs_frame_pool_release(s->frame_pool, &dec_output);
         return DECODER_GOT_FRAME;
@@ -201,10 +215,12 @@ static int jpegxs_decompress_get_property(void *state, int property, void *val, 
         return ret;
 }
 
+// Deinitialize the JPEG XS decompression module
 static void jpegxs_decompress_done(void *state) {
        delete (struct state_decompress_jpegxs *) state;
 }
 
+// Get JPEG XS decoder priority
 static int jpegxs_decompress_get_priority(codec_t compression, struct pixfmt_desc internal, codec_t ugc)
 {
         UNUSED(internal);

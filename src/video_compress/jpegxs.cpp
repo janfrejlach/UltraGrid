@@ -33,6 +33,7 @@ using std::atomic;
 namespace {
 struct state_video_compress_jpegxs;
 
+// JPEG XS compression module internal state
 struct state_video_compress_jpegxs {
         state_video_compress_jpegxs(struct module *parent, const char *opts);
 
@@ -83,6 +84,7 @@ static void jpegxs_worker_get(state_video_compress_jpegxs *s);
 state_video_compress_jpegxs::state_video_compress_jpegxs(struct module *parent, const char *opts) {
         (void) parent;
 
+        // Load JPEG XS encoder default parameters
         SvtJxsErrorType_t err = svt_jpeg_xs_encoder_load_default_parameters(SVT_JPEGXS_API_VER_MAJOR, SVT_JPEGXS_API_VER_MINOR, &encoder);
         if (err != SvtJxsErrorNone) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to load JPEG XS default parameters, error code: %x\n", err);
@@ -91,6 +93,7 @@ state_video_compress_jpegxs::state_video_compress_jpegxs(struct module *parent, 
 
         encoder.bpp_numerator = 3;
 
+        // Parse command line options
         if(opts && opts[0] != '\0') {
                 char *fmt = strdup(opts);
                 if (!parse_fmt(fmt)) {
@@ -100,14 +103,18 @@ state_video_compress_jpegxs::state_video_compress_jpegxs(struct module *parent, 
                 free(fmt);
         }
 
+        // Create threads for sending and retrieving frames from the encoder
         worker_send = thread(jpegxs_worker_send, this);
         worker_get = thread(jpegxs_worker_get, this); 
 }
 
+// Thread for sending frames from the input queue to the encoder
 static void jpegxs_worker_send(state_video_compress_jpegxs *s) {
 while (true) {
+        // Pop video frame from the input queue
         auto frame = s->in_queue.pop();
 
+        // Stop the send thread
         if (!frame) {
                 s->out_queue.push(frame);
         {
@@ -118,6 +125,7 @@ while (true) {
                 break;
         }
 
+        // Configure and initialize the encoder if not yet configured
         if (!s->configured) {
                 struct video_desc desc = video_desc_from_frame(frame.get());
                 if (!configure_with(s, desc)) {
@@ -125,6 +133,7 @@ while (true) {
                 }
         }
 
+        // Get JPEG XS frame from the frame pool
         svt_jpeg_xs_frame_t enc_input;
         SvtJxsErrorType_t err = svt_jpeg_xs_frame_pool_get(s->frame_pool, &enc_input, /*blocking*/ 1);
         if (err != SvtJxsErrorNone) {
@@ -132,9 +141,11 @@ while (true) {
                 continue;
         }
 
+        // Convert and copy the image data to the JPEG XS frame image buffer
         struct tile *in_tile = vf_get_tile(frame.get(), 0);
         s->convert_to_planar((const uint8_t *) in_tile->data, in_tile->width, in_tile->height, &enc_input.image);
 
+        // Send JPEG XS frame to the encoder
         err = svt_jpeg_xs_encoder_send_picture(&s->encoder, &enc_input, /*blocking*/ 1);
         if (err != SvtJxsErrorNone) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to send frame to encoder, error code: %x\n", err);
@@ -145,8 +156,10 @@ while (true) {
 }
 }
 
+// Thread for getting frames from the encoder and putting them into the output queue
 static void jpegxs_worker_get(state_video_compress_jpegxs *s) {
 {
+        // Wait for the configured encoder
         unique_lock<mutex> lock(s->mtx);
         s->cv_configured.wait(lock, [&]{
                 return s->configured || s->stop;
@@ -159,11 +172,13 @@ static void jpegxs_worker_get(state_video_compress_jpegxs *s) {
 while (true) {
 {
         unique_lock<mutex> lock(s->mtx);
+        // Stop the get thread
         if (s->stop && s->frames_received == s->frames_sent) {
                 return;
         }
 }
 
+        // Get encoded JPEG XS frame from the encoder
         svt_jpeg_xs_frame_t enc_output;
         SvtJxsErrorType_t err = svt_jpeg_xs_encoder_get_packet(&s->encoder, &enc_output, /*blocking*/ 1);
         if (err != SvtJxsErrorNone) {
@@ -172,6 +187,7 @@ while (true) {
         }
         s->frames_received++;
 
+        // Allocate UltraGrid video frame
         shared_ptr<video_frame> out_frame = s->pool.get_frame();
         
         struct tile *out_tile = vf_get_tile(out_frame.get(), 0);
@@ -181,14 +197,18 @@ while (true) {
                 continue;
         }
         
+        // Copy encoded bitstream into the UltraGrid video frame
         out_tile->data_len = enc_size;
         memcpy(out_tile->data, enc_output.bitstream.buffer, enc_size);
 
+        // Push compressed video frame to the output queue
         s->out_queue.push(out_frame);
+        // Return JPEG XS with buffers to the pool
         svt_jpeg_xs_frame_pool_release(s->frame_pool, &enc_output);
 }
 }
 
+// Map subsampling to JPEG XS color format
 ColourFormat subsampling_to_jpegxs(int ug_subs) {
         switch (ug_subs) {
         case 444:
@@ -202,8 +222,10 @@ ColourFormat subsampling_to_jpegxs(int ug_subs) {
         }
 }
 
+// Configure and initialize the encoder
 static bool configure_with(struct state_video_compress_jpegxs *s, struct video_desc desc)
 {
+        // Select the correct conversion function from UltraGrid pixel format to JPEG XS format
         const struct uv_to_jpegxs_conversion *conv = get_uv_to_jpegxs_conversion(desc.color_spec);
         if (!conv || !conv->convert) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Unsupported codec: %s\n", get_codec_name(desc.color_spec));
@@ -211,6 +233,7 @@ static bool configure_with(struct state_video_compress_jpegxs *s, struct video_d
         }
         s->convert_to_planar = conv->convert;
 
+        // Set encoder mandatory parameters
         s->encoder.verbose = VERBOSE_SYSTEM_INFO;
         s->encoder.source_width = desc.width;
         s->encoder.source_height = desc.height;
@@ -220,18 +243,21 @@ static bool configure_with(struct state_video_compress_jpegxs *s, struct video_d
         SvtJxsErrorType_t err = SvtJxsErrorNone;
         uint32_t bitstream_size = 0;
         
+        // Get the image config (description) for the JPEG XS frame pool initialization
         err = svt_jpeg_xs_encoder_get_image_config(SVT_JPEGXS_API_VER_MAJOR, SVT_JPEGXS_API_VER_MINOR, &s->encoder, &s->image_config, &bitstream_size);
         if (err != SvtJxsErrorNone) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to get image config from JPEG XS encoder parameters: %x\n", err);
                 return false;
         }
 
+        // Allocate JPEG XS frame pool (image and bitstream buffers)
         s->frame_pool = svt_jpeg_xs_frame_pool_alloc(&s->image_config, bitstream_size, s->pool_size);
         if (!s->frame_pool) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate JPEG XS frame pool\n");
                 return false;
         }
 
+        // Initialize the encoder
         err = svt_jpeg_xs_encoder_init(SVT_JPEGXS_API_VER_MAJOR, SVT_JPEGXS_API_VER_MINOR, &s->encoder);
         if (err != SvtJxsErrorNone) {
                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to initialize JPEG XS encoder: %x\n", err);
@@ -246,11 +272,13 @@ static bool configure_with(struct state_video_compress_jpegxs *s, struct video_d
         unique_lock<mutex> lock(s->mtx);
         s->configured = true;
 }
+        // Notify get thread that it can continue (encoder configured)
         s->cv_configured.notify_one();
 
         return true;
 }
 
+// Parse UltraGrid command line options
 bool state_video_compress_jpegxs::parse_fmt(char *fmt) {
         char *tok, *save_ptr = NULL;
 
@@ -381,9 +409,11 @@ static const struct {
         },
 };
 
+// Initialize the JPEG XS compression module
 static void *jpegxs_compress_init(struct module *parent, const char *opts) {
         struct state_video_compress_jpegxs *s;
         
+        // Display help message
         if (opts && strcmp(opts, "help") == 0) {
                 color_printf(TBOLD("JPEG XS") " compression usage:\n");
                 color_printf("\t" TBOLD(
@@ -406,14 +436,17 @@ static void *jpegxs_compress_init(struct module *parent, const char *opts) {
         return s;
 }
 
+// Push frame into the internal input queue
 static void jpegxs_compress_push(void *state, shared_ptr<video_frame> frame) {
         static_cast<struct state_video_compress_jpegxs *>(state)->in_queue.push(std::move(frame));
 }
 
+// Pop frame from the internal output queue
 static shared_ptr<video_frame> jpegxs_compress_pop(void *state) {
         return static_cast<struct state_video_compress_jpegxs *>(state)->out_queue.pop();
 }
 
+// Deinitialize the JPEG XS compression module
 static void jpegxs_compress_done(void *state) {
         delete (struct state_video_compress_jpegxs *) state;
 }

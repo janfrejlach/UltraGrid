@@ -148,6 +148,7 @@ static void r12l_to_rgbp12le(const uint8_t *src, int width, int height, svt_jpeg
         }       
 }
 
+// Supported conversions between UltraGrid pixel format and JPEG XS format
 static const struct uv_to_jpegxs_conversion uv_to_jpegxs_conversions[] = {
         { UYVY, COLOUR_FORMAT_PLANAR_YUV422, uyvy_to_yuv422p },
         { YUYV, COLOUR_FORMAT_PLANAR_YUV422, yuyv_to_yuv422p },
